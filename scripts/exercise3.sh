@@ -4,13 +4,13 @@ KLIPPER_PORT=/tmp/printer
 
 # exercise with sd card
 # card inserted at X12 Y22
-CARD_X=12
+CARD_X=5
 CARD_Y=23
 CARD_Y_INSERT=23
-CARD_Y_STORE=24
+CARD_Y_STORE=21
 FEEDRATE=18000
 
-SLOTS="202 185 169 153 136.5 121 105 89 73 57"
+SLOTS="203 186.5 170.5 154.5 138 122.5 106.5 90.5 74.5 58.5 42.5 26.5"
 
 function safe_rehome()
 {
@@ -27,7 +27,7 @@ function safe_rehome()
 
 function readjust_with_card() {
 cat <<BABOR >/tmp/printer
-G1 Y5 F1000
+G1 Y5 F$FEEDRATE
 G1 X$CARD_X F$FEEDRATE
 G1 Y$CARD_Y_INSERT
 G4 P100
@@ -45,39 +45,39 @@ BABOR
 
 function insert_card_into_reader() {
 cat <<BABOR >/tmp/printer
-G1 Y5 F1000
+G1 Y5 F$FEEDRATE
 G1 X$CARD_X F$FEEDRATE
 G1 Y$CARD_Y_INSERT
 G4 P100
 GRIPOR_OPEN
 G1 Y16      ; retract to close the beak
 GRIPOR_CLOSE
-G1 Y22      ; push in
-G1 Y5
+G1 Y22 F1000     ; push in
+G1 Y5 F$FEEDRATE
 GRIPOR_OPEN
 BABOR
 }
 
 function insert_card_into_store() {
 cat <<BABOR >/tmp/printer
-G1 Y5 F1000
+G1 Y5 F$FEEDRATE
 G1 Y$CARD_Y_STORE
 G4 P100
 GRIPOR_OPEN
 
-G1 Y$((CARD_Y_STORE-2))
-GRIPOR_CLOSE
-G1 Y$CARD_Y_STORE
-GRIPOR_OPEN
-
-;G1 Y$((CARD_Y_STORE-2))
-;GRIPOR_CLOSE
-;G1 Y$CARD_Y_STORE
-;GRIPOR_OPEN
-
-G1 Y14      ; retract to close the beak
-GRIPOR_CLOSE
-G1 Y22      ; push in slightly
+;; G1 Y$((CARD_Y_STORE-2))
+;; GRIPOR_CLOSE
+;; G1 Y$CARD_Y_STORE
+;; GRIPOR_OPEN
+;; 
+;; ;G1 Y$((CARD_Y_STORE-2))
+;; ;GRIPOR_CLOSE
+;; ;G1 Y$CARD_Y_STORE
+;; ;GRIPOR_OPEN
+;; 
+;; G1 Y14      ; retract to close the beak
+;; GRIPOR_CLOSE
+;; G1 Y$((CARD_Y_STORE-3))      ; push in slightly
 G1 Y5
 GRIPOR_OPEN
 BABOR
@@ -85,10 +85,10 @@ BABOR
 
 function pick_card_from_store() {
 cat <<BABOR >/tmp/printer
-G1 Y5 F1000
+G1 Y5 F$FEEDRATE
 GRIPOR_OPEN
 G4 P100
-G1 Y$CARD_Y_STORE
+G1 Y$((CARD_Y_STORE+1))
 GRIPOR_CLOSE
 G1 Y5
 BABOR
@@ -96,7 +96,7 @@ BABOR
 
 function pick_card_from_reader() {
 cat <<BABOR >/tmp/printer
-G1 Y5 F1000
+G1 Y5 F$FEEDRATE
 GRIPOR_OPEN
 G1 X$CARD_X F$FEEDRATE
 G1 Y$CARD_Y_INSERT
@@ -109,7 +109,7 @@ BABOR
 function move_to_x()
 {
 cat <<BABOR >/tmp/printer
-G1 Y5 F1000
+G1 Y5 F$FEEDRATE
 G1 X$1 F$FEEDRATE
 BABOR
 }
