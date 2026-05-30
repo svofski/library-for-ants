@@ -7,7 +7,7 @@ import asyncio
 import pyudev
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, RichLog
-from textual.containers import Vertical
+from textual.containers import Vertical, Horizontal
 from textual.worker import get_current_worker
 from textual import work
 import psutil
@@ -31,6 +31,38 @@ def parse_config_and_args():
     read_robot_config(config)
 
     return pipe_path
+
+class Logger:
+    def __init__(self, app, id):
+        self.app = app
+        self.id = id
+        self.history = []
+        self.repeats = 0
+
+    def write(self, message: str) -> None:
+        log_widget = self.app.query_one(f"#{self.id}", RichLog)
+        if self.history and len(self.history) > 0 and self.history[-1] == message:
+            self.repeats += 1
+            self.update(message, self.repeats)
+        else:
+            self.repeats = 0
+            self.history.append(message)
+            log_widget.write(message)
+
+    def update(self, message: str, repeats: int = 0) -> None:
+        log_widget = self.app.query_one(f"#{self.id}", RichLog)
+        if self.history:
+            self.history.pop()
+            self.history.append(message)
+            log_widget.clear()
+            for line in self.history[:-1]:
+                log_widget.write(line)
+            if repeats:
+                log_widget.write(f"{message} [bold cyan]({repeats + 1}x)[/bold cyan]")
+            else:
+                log_widget.write(message)
+
+    
 
 class TextualRobotnik(App):
     CSS = """
@@ -61,32 +93,11 @@ class TextualRobotnik(App):
         self.pipe_fd = None
         self.pipe_writer = None
         self.read_buffer = ""
-        self.log_history = []
-        self.log_repeats = 0
+        self.log_general = Logger(self, "general_log")
+        self.log_klipper = Logger(self, "klipper_log")
 
-    def log_write(self, message: str) -> None:
-        log_widget = self.query_one(RichLog)
-        if self.log_history and len(self.log_history) > 0 and self.log_history[-1] == message:
-            self.log_repeats += 1
-            self.log_update(message, self.log_repeats)
-        else:
-            self.log_repeats = 0
-            self.log_history.append(message)
-            log_widget.write(message)
-
-    def log_update(self, message: str, repeats: int = 0) -> None:
-        log_widget = self.query_one(RichLog)
-        if self.log_history:
-            self.log_history.pop()
-            self.log_history.append(message)
-            log_widget.clear()
-            for line in self.log_history[:-1]:
-                log_widget.write(line)
-            if repeats:
-                log_widget.write(f"{message} [bold cyan]({repeats + 1}x)[/bold cyan]")
-            else:
-                log_widget.write(message)
-
+    def log_write(self, msg: str) -> None:
+        self.log_general.write(msg)
 
     def log_commands_help(self):
         macros = ' '.join([x for x in robot_macros])
@@ -97,8 +108,10 @@ class TextualRobotnik(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical():
-            yield RichLog(highlight=True, markup=True, max_lines=1000)
-            yield Input(placeholder="Type G-code or macro , (e.g., G28, GET_POSITION, CHECK_HOMED, PUT slot, GET slot, GRIPOR_OPEN, GRIPOR_CLOSE) and press Enter...")
+            with Horizontal():
+                yield RichLog(id="general_log", highlight=True, markup=True, max_lines=1000)
+                yield RichLog(id="klipper_log", highlight=True, markup=True, max_lines=1000)
+            yield Input(id="input", placeholder="Type G-code or macro , (e.g., G28, GET_POSITION, CHECK_HOMED, PUT slot, GET slot, GRIPOR_OPEN, GRIPOR_CLOSE) and press Enter...")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -113,7 +126,7 @@ class TextualRobotnik(App):
             return
 
         self.log_write(f"[bold green][+][/bold green] READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} SLOTS={robot_get_slots()}")
-        self.log_write(f"[bold green][+][/bold green] BLOCK_DEVICE={robot_get_block_device()}")
+        self.log_write(f"[bold green][+][/bold green] BLOCK_DEVICE={robot_get_block_device()} MNT={robot_get_mount_point()}")
         self.log_commands_help()
 
         robot_set_logger(self.log_write)
@@ -156,6 +169,9 @@ class TextualRobotnik(App):
 		# volumes monitor
         self.track_volumes()
 
+        # bloody focus
+        self.query_one(Input).focus()
+
     def handle_pipe_read(self) -> None:
         try:
             ready_data = os.read(self.pipe_fd, 4096)
@@ -166,7 +182,7 @@ class TextualRobotnik(App):
                     line = line.strip()
                     if line:
                         # Append directly into our scrollable TUI panel log view
-                        self.log_write(f"[cyan][KLIPPER][/cyan] {line}")
+                        self.log_klipper.write(f"[cyan][KLIPPER][/cyan] {line}")
                         if line.find("AXIS_STATUS: READY") != -1:
                             HOMED = True
                         if line.find("AXIS_STATUS: UNHOMED") != -1:
@@ -208,13 +224,13 @@ class TextualRobotnik(App):
         cmdproc = False
         try:
             cmdproc = robot_commands[cmd.lower().split()[0]]
-            self.log_write(f"cmdproc={cmdproc}")
+            #self.log_write(f"cmdproc={cmdproc}")
             if cmdproc:
                 cmd = cmdproc(cmd.split())
         except Exception as e:
             self.log_write(f"Exception in cmdproc: {e}")
 
-        self.log_write(f"[bold magenta]>>> {cmd}[/bold magenta]")
+        self.log_klipper.write(f"[bold magenta]>>> {cmd}[/bold magenta]")
         
         input_widget.value = ""
 
@@ -245,6 +261,7 @@ class TextualRobotnik(App):
             
             if action == "add":
                 self.log_write(f"[bold green][+ CARD ADD][/bold green] Node: {device.device_node}")
+                self.set_timer(2.0, self.read_media_dir())
             elif action == "remove":
                 self.log_write(f"[bold red][- CARD REMOVE][/bold red] Node: {device.device_node}")
             elif action == "change":
@@ -283,6 +300,16 @@ class TextualRobotnik(App):
                 if mountpoint not in current_parts:
                     self.call_from_thread(self.log_write, f"DISMOUNTED {device} {mountpoint}")
             last_parts = current_parts
+
+    def read_media_dir(self) -> None:
+        try:
+            files = os.listdir(robot_get_mount_point())
+            self.log_write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}")
+        except OSError:
+            self.notify("Drive was not ready", severity="error")
+
+
+
 
 if __name__ == "__main__":
     target_pipe = parse_config_and_args()

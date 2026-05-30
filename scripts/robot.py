@@ -14,6 +14,7 @@ CARD_Y_STORE = 22
 SPEED_FULL = 18000
 SLOTS = 27.5
 BLOCK_DEVICE = "sda"
+MOUNT_POINT = "/mnt/robot_media"
 
 STATE = 0                   # 0 = homing check, 1,2 = homing loop, 10 = normal
 SCRIPT_CMD = None
@@ -264,8 +265,11 @@ def robot_get_speed_full():
 def robot_get_block_device():
     return BLOCK_DEVICE
 
+def robot_get_mount_point():
+    return MOUNT_POINT
+
 def read_robot_config(config):
-    global CARD_X, CARD_Y, CARD_Y_INSERT, CARD_Y_STORE, SPEED_FULL, SLOTS, BLOCK_DEVICE
+    global CARD_X, CARD_Y, CARD_Y_INSERT, CARD_Y_STORE, SPEED_FULL, SLOTS, BLOCK_DEVICE, MOUNT_POINT
 
     CARD_X = float(config.get("robot", "card_x", fallback=CARD_X))
     CARD_Y = float(config.get("robot", "card_y", fallback=CARD_Y))
@@ -274,6 +278,7 @@ def read_robot_config(config):
     SPEED_FULL = float(config.get("robot", "speed_full", fallback=SPEED_FULL))
     SLOTS = config.get("robot", "slots", fallback=SLOTS)
     BLOCK_DEVICE = config.get("robot", "block_device", fallback=BLOCK_DEVICE)
+    MOUNT_POINT = config.get("robot", "mount_point", fallback=MOUNT_POINT)
 
 def main():
     args = parse_arguments()
