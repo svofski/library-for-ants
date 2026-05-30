@@ -1,0 +1,8 @@
+[Unit]
+Description=Robot SD Card Mount Point
+
+[Mount]
+What=/dev/sda1
+Where=/mnt/robot_media
+Type=auto
+Options=defaults,nofail

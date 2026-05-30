@@ -1,0 +1,9 @@
+[Unit]
+Description=Automount Trigger for Robot SD Card
+
+[Automount]
+Where=/mnt/robot_media
+TimeoutIdleSec=10
+
+[Install]
+WantedBy=multi-user.target

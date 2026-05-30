@@ -7,10 +7,11 @@ KLIPPER_PORT=/tmp/printer
 CARD_X=5
 CARD_Y=23
 CARD_Y_INSERT=23
-CARD_Y_STORE=21
+CARD_Y_STORE=22
 FEEDRATE=18000
+#FEEDRATE=5000
 
-SLOTS="203 186.5 170.5 154.5 138 122.5 106.5 90.5 74.5 58.5 42.5 26.5"
+SLOTS="204 187.5 171.5 155.5 139 123.5 107.5 91.5 75.5 59.5 43.5 27.5"
 
 function safe_rehome()
 {
@@ -50,9 +51,11 @@ G1 X$CARD_X F$FEEDRATE
 G1 Y$CARD_Y_INSERT
 G4 P100
 GRIPOR_OPEN
-G1 Y16      ; retract to close the beak
+G1 Y14      ; retract to close the beak
+M400
 GRIPOR_CLOSE
 G1 Y22 F1000     ; push in
+G4 P250
 G1 Y5 F$FEEDRATE
 GRIPOR_OPEN
 BABOR
@@ -65,20 +68,32 @@ G1 Y$CARD_Y_STORE
 G4 P100
 GRIPOR_OPEN
 
-;; G1 Y$((CARD_Y_STORE-2))
-;; GRIPOR_CLOSE
-;; G1 Y$CARD_Y_STORE
-;; GRIPOR_OPEN
-;; 
-;; ;G1 Y$((CARD_Y_STORE-2))
-;; ;GRIPOR_CLOSE
-;; ;G1 Y$CARD_Y_STORE
-;; ;GRIPOR_OPEN
-;; 
-;; G1 Y14      ; retract to close the beak
-;; GRIPOR_CLOSE
-;; G1 Y$((CARD_Y_STORE-3))      ; push in slightly
-G1 Y5
+ G1 Y$((CARD_Y_STORE-2))
+ GRIPOR_CLOSE
+ G1 Y$CARD_Y_STORE
+ GRIPOR_OPEN
+ 
+ ;G1 Y$((CARD_Y_STORE-2))
+ ;GRIPOR_CLOSE
+ ;G1 Y$CARD_Y_STORE
+ ;GRIPOR_OPEN
+ 
+G1 Y14      ; retract to close the beak
+GRIPOR_CLOSE
+G1 Y$((CARD_Y_STORE-3)) F1000     ; push in slightly
+G4 P250
+
+
+; wiggle wiggle wiggle
+ G91
+ G1 X0.5 F250
+ G1 X-1
+ G1 X1
+ G1 X-0.5
+ G90
+ M400
+;
+G1 Y5 F$FEEDRATE
 GRIPOR_OPEN
 BABOR
 }
@@ -156,7 +171,7 @@ for slot_x in $SLOTS; do
   wait_for_completion "PUT CARD TO STORE AT $slot_x"
   #echo -e "press enter"
   #read dummy
-  sleep 2
+  #sleep 1
   pick_card_from_store
   wait_for_completion "GET CARD FROM STORE AT $slot_x"
 
@@ -165,7 +180,7 @@ for slot_x in $SLOTS; do
   wait_for_completion "INSERT CARD IN READER"
   #echo -e "press enter"
   #read dummy
-  sleep 2
+  #sleep 2
   pick_card_from_reader
   wait_for_completion "REMOVE CARD FROM READER"
 done
