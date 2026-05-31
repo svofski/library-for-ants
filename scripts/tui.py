@@ -15,6 +15,7 @@ import psutil
 from robot import *
 
 HOMED = False
+CARD_IN_GRIPOR = False
 
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
@@ -95,6 +96,7 @@ class TextualRobotnik(App):
         self.read_buffer = ""
         self.log_general = Logger(self, "general_log")
         self.log_klipper = Logger(self, "klipper_log")
+        self.card_sensor_future = None
 
     def log_write(self, msg: str) -> None:
         self.log_general.write(msg)
@@ -169,7 +171,7 @@ class TextualRobotnik(App):
 		# volumes monitor
         self.track_volumes()
 
-        # bloody focus
+        # focus on the input field
         self.query_one(Input).focus()
 
     def handle_pipe_read(self) -> None:
@@ -191,6 +193,15 @@ class TextualRobotnik(App):
                         if line.find("Must home axes first") != -1:
                             HOMED = False
                             self.send_command("G28")
+                        if self.card_sensor_future and not self.card_sensor_future.done():
+                            if line.find("filament not detected") != -1:
+                                CARD_IN_GRIPOR = False
+                                self.card_sensor_future.set_result(False)
+                                self.log_general("[cyan]PROBE[/cyan] No card in gripor")
+                            if line.find("filament detected") != -1:
+                                CARD_IN_GRIPOR = True
+                                self.card_sensor_future.set_result(True)
+                                self.log_general("[cyan]PROBE[/cyan] Card in gripor")
         except BlockingIOError:
             pass # does it even happen? 
         except OSError as e:
@@ -219,6 +230,13 @@ class TextualRobotnik(App):
 
         if cmd.lower() in ['exit', 'quit', 'feckov', 'feckoff']:
             self.exit()
+            return
+
+        if cmd.lower().split()[0] == 'check':
+            n,x = get_slot(cmd.lower().split())
+            self.log_general.write(f"[cyan]Running check_slot_sequence()[/cyan]")
+            self.check_slot_sequence(n)
+            input_widget.value = ""
             return
 
         cmdproc = False
@@ -308,8 +326,35 @@ class TextualRobotnik(App):
         except OSError:
             self.notify("Drive was not ready", severity="error")
 
+    @work(exclusive=True)
+    async def check_slot_sequence(self, slots=0):
+        try:
+            lslots = list(slots)
+        except:
+            if slots == -1:
+                lslots = range(len(robot_get_slots()))
+            else:
+                lslots = [slots]
 
 
+        for n in lslots:
+            self.send_command(cmd_get(['get', n]))
+            await asyncio.sleep(0.2)
+            self.send_command(move_to_slot(['slot', 0]))
+            await asyncio.sleep(0.2)
+            self.card_sensor_future = asyncio.get_running_loop().create_future()
+            self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
+            #await asyncio.sleep(0.2)
+            await self.card_sensor_future
+            if self.card_sensor_future.result():
+                self.log_general.write(f"[cyan][+][/cyan] Card present in slot {n}")
+                self.send_command(cmd_put(['put', n]))
+            else:
+                self.send_command("GRIPOR_OPEN")
+            #await self.wait_for_idle()
+
+
+        
 
 if __name__ == "__main__":
     target_pipe = parse_config_and_args()

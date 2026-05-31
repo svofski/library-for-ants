@@ -10,7 +10,7 @@ import configparser
 CARD_X = 5
 CARD_Y = 23
 CARD_Y_INSERT = 23
-CARD_Y_STORE = 22
+CARD_Y_STORE = 18
 SPEED_FULL = 18000
 SLOTS = 27.5
 BLOCK_DEVICE = "sda"
@@ -183,32 +183,30 @@ G1 Y{CARD_Y_STORE}
 G4 P100
 GRIPOR_OPEN
 
- G1 Y{CARD_Y_STORE-2}
- GRIPOR_CLOSE
- G1 Y{CARD_Y_STORE}
- GRIPOR_OPEN
- 
- ;G1 Y{CARD_Y_STORE-2}
- ;GRIPOR_CLOSE
- ;G1 Y{CARD_Y_STORE}
- ;GRIPOR_OPEN
+;; G1 Y{CARD_Y_STORE-2}
+;; GRIPOR_CLOSE
+;; G1 Y{CARD_Y_STORE}
+;; GRIPOR_OPEN
+;; 
+;; ;G1 Y{CARD_Y_STORE-2}
+;; ;GRIPOR_CLOSE
+;; ;G1 Y{CARD_Y_STORE}
+;; ;GRIPOR_OPEN
  
 G1 Y14      ; retract to close the beak
 GRIPOR_CLOSE
 G1 Y{CARD_Y_STORE-3} F1000     ; push in slightly
-G4 P250
-
-
-; wiggle wiggle wiggle
- G91
- G1 X0.5 F250
- G1 X-1
- G1 X1
- G1 X-0.5
- G90
- M400
+; G4 P250
+; ; wiggle wiggle wiggle
+;  G91
+;  G1 X0.5 F250
+;  G1 X-1
+;  G1 X1
+;  G1 X-0.5
+;  G90
+;  M400
 ;
-G1 Y5 F{SPEED_FULL}
+G1 Y5 F{SPEED_FULL/4}
 GRIPOR_OPEN
 '''
 
@@ -220,7 +218,7 @@ def get_from_store(args):
 G1 Y5 F{SPEED_FULL}
 GRIPOR_OPEN
 G4 P100
-G1 Y{CARD_Y_STORE+1}
+G1 Y{CARD_Y_STORE}
 GRIPOR_CLOSE
 G1 Y5
 '''
@@ -277,8 +275,11 @@ def read_robot_config(config):
     CARD_Y_STORE = float(config.get("robot", "card_y_store", fallback=CARD_Y_STORE))
     SPEED_FULL = float(config.get("robot", "speed_full", fallback=SPEED_FULL))
     SLOTS = config.get("robot", "slots", fallback=SLOTS)
+    SLOTS = ' '.join(SLOTS.split()[::-1])
+
     BLOCK_DEVICE = config.get("robot", "block_device", fallback=BLOCK_DEVICE)
     MOUNT_POINT = config.get("robot", "mount_point", fallback=MOUNT_POINT)
+
 
 def main():
     args = parse_arguments()
