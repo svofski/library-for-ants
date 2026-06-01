@@ -5,8 +5,9 @@ import argparse
 import configparser
 import asyncio
 import pyudev
+from functools import partial
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog
+from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree
 from textual.containers import Vertical, Horizontal
 from textual.worker import get_current_worker
 from textual import work
@@ -16,6 +17,8 @@ from robot import *
 
 HOMED = False
 CARD_IN_GRIPOR = False
+
+MOUNTED = 0
 
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
@@ -39,6 +42,7 @@ class Logger:
         self.id = id
         self.history = []
         self.repeats = 0
+        self.max_lines = 200
 
     def write(self, message: str) -> None:
         log_widget = self.app.query_one(f"#{self.id}", RichLog)
@@ -49,6 +53,7 @@ class Logger:
             self.repeats = 0
             self.history.append(message)
             log_widget.write(message)
+        self.history = self.history[:self.max_lines]
 
     def update(self, message: str, repeats: int = 0) -> None:
         log_widget = self.app.query_one(f"#{self.id}", RichLog)
@@ -81,6 +86,33 @@ class TextualRobotnik(App):
         dock: bottom;
         border: tall ;
     }
+    Static {
+        text-align: center;
+    }
+    Button.slot {
+        background: #222;
+    }
+    Button.slot.present {
+        background: orange;
+        color: black;
+    }
+    Button.slot.busy {
+        background: #777;
+        color: white;
+    }
+    Button.slot.busy.blunk {
+        background: yellow;
+        color: black;
+    }
+    Button.slot.online {
+        background: orange;
+        color: black;
+    }
+    Button#dismount {
+        background: red;
+        color: yellow;
+    }
+
     """
     
     BINDINGS = [
@@ -111,8 +143,21 @@ class TextualRobotnik(App):
         yield Header(show_clock=True)
         with Vertical():
             with Horizontal():
-                yield RichLog(id="general_log", highlight=True, markup=True, max_lines=1000)
-                yield RichLog(id="klipper_log", highlight=True, markup=True, max_lines=1000)
+                yield RichLog(id="general_log", highlight=True, markup=True, max_lines=200)
+                yield RichLog(id="klipper_log", highlight=True, markup=True, max_lines=200)
+            with Horizontal():
+                for n in range(12,0,-1):
+                    with Vertical():
+                        yield Static(f"Slot {n}", shrink=True)
+                        yield Button("Present", id=f"check{n}", classes="slot")
+                        yield Button("Mount", id=f"mount{n}", classes="mount-button")
+                with Vertical():
+                    yield Static("Reader", shrink=True)
+                    yield Button("Empty", id=f"list", classes="slot online")
+                    yield Button("Dismount", id="dismount", classes="mount", disabled=True)
+            yield DirectoryTree(robot_get_mount_point())
+
+
             yield Input(id="input", placeholder="Type G-code or macro , (e.g., G28, GET_POSITION, CHECK_HOMED, PUT slot, GET slot, GRIPOR_OPEN, GRIPOR_CLOSE) and press Enter...")
         yield Footer()
 
@@ -214,6 +259,7 @@ class TextualRobotnik(App):
 
         if self.pipe_writer:
             try:
+                self.log_klipper.write(f"[bold magenta]{cmd}[/bold magenta]")
                 self.pipe_writer.write(f"{cmd}\n")
                 self.pipe_writer.flush()
             except OSError as e:
@@ -239,17 +285,27 @@ class TextualRobotnik(App):
             input_widget.value = ""
             return
 
+        if cmd.lower().split()[0] == 'mount':
+            n,x = get_slot(cmd.lower().split())
+            self.log_general.write(f"[cyan]Running mount_slot_sequence()[/cyan]")
+            self.mount_slot_sequence(n)
+            input_widget.value = ""
+            return
+        
+        if cmd.lower().split()[0] == 'dismount':
+            self.log_general.write(f"[cyan]Running dismount_slot_sequence()[/cyan]")
+            self.dismount_slot_sequence()
+            input_widget.value = ""
+            return
+
         cmdproc = False
         try:
             cmdproc = robot_commands[cmd.lower().split()[0]]
-            #self.log_write(f"cmdproc={cmdproc}")
             if cmdproc:
                 cmd = cmdproc(cmd.split())
         except Exception as e:
             self.log_write(f"Exception in cmdproc: {e}")
 
-        self.log_klipper.write(f"[bold magenta]>>> {cmd}[/bold magenta]")
-        
         input_widget.value = ""
 
         self.send_command(cmd)
@@ -319,13 +375,6 @@ class TextualRobotnik(App):
                     self.call_from_thread(self.log_write, f"DISMOUNTED {device} {mountpoint}")
             last_parts = current_parts
 
-    def read_media_dir(self) -> None:
-        try:
-            files = os.listdir(robot_get_mount_point())
-            self.log_write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}")
-        except OSError:
-            self.notify("Drive was not ready", severity="error")
-
     @work(exclusive=True)
     async def check_slot_sequence(self, slots=0):
         try:
@@ -336,8 +385,10 @@ class TextualRobotnik(App):
             else:
                 lslots = [slots]
 
-
         for n in lslots:
+            btn = self.query_one(f"#check{n}")
+            btn.add_class("busy")
+            blinker = self.set_interval(0.5, partial(self.busy_animation, btn))
             self.send_command(cmd_get(['get', n]))
             await asyncio.sleep(0.2)
             self.send_command(move_to_slot(['slot', 0]))
@@ -349,12 +400,101 @@ class TextualRobotnik(App):
             if self.card_sensor_future.result():
                 self.log_general.write(f"[cyan][+][/cyan] Card present in slot {n}")
                 self.send_command(cmd_put(['put', n]))
+                btn.add_class("present")
             else:
                 self.send_command("GRIPOR_OPEN")
-            #await self.wait_for_idle()
+                btn.remove_class("present")
+            blinker.stop()
+            btn.remove_class("busy")
+            btn.remove_class("blunk")
+
+    def disable_mount_buttons(self, disable: bool) -> None:
+        for patonki in self.query('.mount-button'):
+            patonki.disabled = disable
 
 
-        
+    @work(exclusive=True)
+    async def mount_slot_sequence(self, slot=0):
+        global MOUNTED
+        slot = int(slot)
+        if MOUNTED != 0 and MOUNTED != slot:
+            self.log_general.write(f"[red][+][/red] Card {MOUNTED} is mounted, dismount first.")
+            return
+
+        if MOUNTED == slot:
+            self.log_general.write(f"[red][+][/red] Card already mounted.")
+            return
+
+        self.disable_mount_buttons(disable=True)
+
+        n = slot
+        check_btn = self.query_one(f"#check{n}")
+        dismo_btn = self.query_one(f"#dismount")
+        check_btn.add_class("busy")
+
+        self.send_command(cmd_get(['get', n]))
+        await asyncio.sleep(0.2)
+        self.send_command(move_to_slot(['slot', 0]))
+        await asyncio.sleep(0.2)
+        self.card_sensor_future = asyncio.get_running_loop().create_future()
+        self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
+        await self.card_sensor_future
+        if self.card_sensor_future.result():
+            self.log_general.write(f"[cyan][+][/cyan] Card in gripor")
+            self.send_command(cmd_put(['put', 0]))
+            check_btn.add_class("present")
+            dismo_btn.disabled = False
+            MOUNTED = n
+        else:
+            self.log_general.write(f"[red][+][/red] No card")
+            self.send_command("GRIPOR_OPEN")
+            check_btn.remove_class("present")
+            self.disable_mount_buttons(disable=false)
+        check_btn.remove_class("busy")
+        check_btn.remove_class("blunk")
+
+    @work(exclusive=True)
+    async def dismount_slot_sequence(self):
+        global MOUNTED
+        if MOUNTED == 0:
+            self.log_general.write(f"[red][+][/red] Not mounted.")
+            return
+
+        dismo_btn = self.query_one(f"#dismount")
+        dismo_btn.disabled = True
+
+        self.send_command(cmd_get(['get', 0]))
+        await asyncio.sleep(0.2)
+        self.send_command(cmd_put(['put', MOUNTED]))
+        await asyncio.sleep(0.2)
+        MOUNTED = 0
+        self.disable_mount_buttons(disable=False)
+
+
+
+    def busy_animation(self, btn):
+        if btn.has_class("blunk"):
+            btn.remove_class("blunk")
+        else:
+            btn.add_class("blunk")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id.startswith("check"):
+            slot = event.button.id[len("check"):]
+            self.check_slot_sequence(slots=[slot])
+        if event.button.id.startswith("mount"):
+            slot = int(event.button.id[len("mount"):])
+            self.mount_slot_sequence(slot)
+        if event.button.id.startswith("dismount"):
+            self.dismount_slot_sequence()
+
+    def read_media_dir(self) -> None:
+        try:
+            files = os.listdir(robot_get_mount_point())
+            self.query_one(DirectoryTree).reload()
+            self.log_write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}")
+        except OSError:
+            self.notify("Drive was not ready", severity="error")
 
 if __name__ == "__main__":
     target_pipe = parse_config_and_args()

@@ -1,8 +1,11 @@
 [Unit]
 Description=Robot SD Card Mount Point
+JobTimeoutSec=2s
+JobTimeoutAction=fail
 
 [Mount]
 What=/dev/sda1
 Where=/mnt/robot_media
 Type=auto
-Options=defaults,nofail
+Options=defaults,nofail,gid=plugdev,dmask=002,fmask=113
+
