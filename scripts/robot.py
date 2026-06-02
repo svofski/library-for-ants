@@ -111,7 +111,7 @@ def robot_set_logger(loggor):
     log_write = loggor
 
 def get_slot(args, cmd="get_slot_num"):
-    slots = SLOTS.split()
+    slots = SLOTS
     if len(args) < 2:
         msg = f"{cmd}: missing slot number"
         log_write(msg) if log_write else print(msg, file=sys.stderr)
@@ -170,6 +170,16 @@ G1 Y22 F1000     ; push in
 G4 P250
 G1 Y5 F{SPEED_FULL}
 GRIPOR_OPEN
+'''
+
+def adjust_card_in_slot(args):
+    text = ''
+    if len(args) > 1:
+        text = move_to_slot(args)
+    return text + f'''
+G1 Y5 F{SPEED_FULL}
+G1 Y{CARD_Y_STORE-3} F1000     ; push in slightly
+G1 Y5 F{SPEED_FULL/4}
 '''
 
 def put_to_store(args):
@@ -243,7 +253,8 @@ def cmd_put(args):
 robot_commands = {
         'put': cmd_put,
         'get': cmd_get,
-        'slot': move_to_slot
+        'slot': move_to_slot,
+        'adjust': adjust_card_in_slot
         }
 
 robot_macros = (
@@ -275,7 +286,7 @@ def read_robot_config(config):
     CARD_Y_STORE = float(config.get("robot", "card_y_store", fallback=CARD_Y_STORE))
     SPEED_FULL = float(config.get("robot", "speed_full", fallback=SPEED_FULL))
     SLOTS = config.get("robot", "slots", fallback=SLOTS)
-    SLOTS = ' '.join(SLOTS.split()[::-1])
+    SLOTS = [float(x) for x in SLOTS.split()[::-1]]
 
     BLOCK_DEVICE = config.get("robot", "block_device", fallback=BLOCK_DEVICE)
     MOUNT_POINT = config.get("robot", "mount_point", fallback=MOUNT_POINT)
