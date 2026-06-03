@@ -7,7 +7,7 @@ import asyncio
 import pyudev
 from functools import partial
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree
+from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree, Label
 from textual.containers import Vertical, Horizontal
 from textual.worker import get_current_worker
 from textual import work
@@ -123,12 +123,23 @@ class TextualRobotnik(App):
         color: yellow;
     }
     Button.service-button {
-        background: #404;
+        background: #424;
         color: yellow;
         min-width: 8;
         margin: 1;
     }
-
+    Button.service-button.abort-button {
+        background: red;
+    }
+    .status-label {
+        background: #144;
+        color: white;
+        min-width: 30;
+        height: 3;
+        margin: 1;
+        content-align: center middle;
+        width: 1fr;
+    }
     """
 
     BINDINGS = [
@@ -172,17 +183,17 @@ class TextualRobotnik(App):
                     yield Button("Rescan", id="btn-rescan", classes="slot online")
                     yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
             with Horizontal():
+                yield Label("READY", id="svc-status", classes="status-label")
+                yield Button("ABORT", id="svc-abort", classes="service-button abort-button")
                 yield Button("REHOME", id="svc-rehome", classes="service-button")
                 yield Button("CHECK ALL", id="svc-check-all", classes="service-button")
                 yield Button("ADJUST ALL", id="svc-adj-all", classes="service-button")
             yield Static(f"{robot_get_block_device()} on {robot_get_mount_point()}: {MOUNTED_UUID}", id="mount_label")
             yield DirectoryTree(robot_get_mount_point())
-
-
             yield Input(id="input", placeholder="Type G-code or macro , (e.g., G28, GET_POSITION, CHECK_HOMED, PUT slot, GET slot, GRIPOR_OPEN, GRIPOR_CLOSE) and press Enter...")
         yield Footer()
 
-    def on_mount(self) -> None:
+    def open_pipes(self):
         # read from klipper
         try:
             self.pipe_fd = os.open(self.pipe_path, os.O_RDONLY | os.O_NONBLOCK)
@@ -191,37 +202,25 @@ class TextualRobotnik(App):
             self.log_write(f"[bold red][-] Failed to open read pipe:[/bold red] {e}")
             return
 
-        self.log_write(f"[bold green][+][/bold green] READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} SLOTS={robot_get_slots()}")
-        self.log_write(f"[bold green][+][/bold green] BLOCK_DEVICE={robot_get_block_device()} MNT={robot_get_mount_point()}")
-        self.log_commands_help()
-
-        robot_set_logger(self.log_write)
-
-
-        # udev monitor
-        self.context = pyudev.Context()
-        self.monitor = pyudev.Monitor.from_netlink(self.context)
-        self.monitor.filter_by(subsystem='block')
-        self.monitor.start()
-        udev_fd = self.monitor.fileno()
-        loop = asyncio.get_running_loop()
-        loop.add_reader(udev_fd, self.handle_udev_read)
-
         # write to klipper
         try:
             self.pipe_writer = open(self.pipe_path, "w", encoding="utf-8", buffering=1)
-
             # immediately query homed status
             if self.pipe_writer:
                 try:
-                    self.pipe_writer.write(f"CHECK_HOMED\n")
+                    self.pipe_writer.write(f"STATUS\n")
                     self.pipe_writer.flush()
                 except OSError as e:
                     self.log_write(f"[bold red][-] Write failure down active pipe matrix:[/bold red] {e}")
+                    self.close_pipes()
+                    return
             else:
                 self.log_write("[bold red][-] Connection writing pipe context unavailable.[/bold red]")
+                self.close_pipes()
+                return
 
         except OSError as e:
+            self.close_pipes()
             self.log_write(f"[bold red][-] Failed to open write pipe:[/bold red] {e}")
             return
 
@@ -229,11 +228,52 @@ class TextualRobotnik(App):
         loop = asyncio.get_running_loop()
         loop.add_reader(self.pipe_fd, self.handle_pipe_read)
 
+        if self.reopen_timer != None:
+            self.reopen_timer.stop()
+            self.reopen_timer = None
+
+    def close_pipes(self) -> None:
+        if self.pipe_fd is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.remove_reader(self.pipe_fd)
+                os.close(self.pipe_fd)
+            except Exception:
+                pass
+        if self.pipe_writer:
+            try:
+                self.pipe_writer.close()
+            except Exception:
+                pass
+
+    def on_mount(self) -> None:
+        self.reopen_timer = None
+        self.ABORTED = False
+        self.log_write(f"[bold green][+][/bold green] READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} SLOTS={robot_get_slots()}")
+        self.log_write(f"[bold green][+][/bold green] BLOCK_DEVICE={robot_get_block_device()} MNT={robot_get_mount_point()}")
+        self.log_commands_help()
+
+        robot_set_logger(self.log_write)
+
+        # udev monitor
+        self.context = pyudev.Context()
+        self.monitor = pyudev.Monitor.from_netlink(self.context)
+        self.monitor.filter_by(subsystem='block')
+        self.monitor.start()
+        udev_fd = self.monitor.fileno()
+
+        loop = asyncio.get_running_loop()
+        loop.add_reader(udev_fd, self.handle_udev_read)
+
 		# volumes monitor
         self.track_volumes()
 
         # focus on the input field
         self.query_one(Input).focus()
+        self.open_pipes()
+
+        self.disable_all_buttons(True)
+        
 
     def handle_pipe_read(self) -> None:
         global HOMED, CARD_IN_GRIPOR
@@ -257,6 +297,9 @@ class TextualRobotnik(App):
                         if line.find("Must home axes first") != -1:
                             HOMED = False
                             self.send_command("G28")
+                        if line.find("Klipper state: Ready") != -1:
+                            self.send_command("CHECK_HOMED")
+                            self.disable_all_buttons(disable=False)
                         if line.find("Lost communication with MCU") != -1 or line.find("Klipper state: Shutdown") != -1:
                             self.go_offline()
                             HOMED = False
@@ -265,13 +308,22 @@ class TextualRobotnik(App):
                             if line.find("filament not detected") != -1:
                                 CARD_IN_GRIPOR = False
                                 self.card_sensor_future.set_result(False)
-                                self.log_general("[cyan]PROBE[/cyan] No card in gripor")
+                                self.log_general.write("[cyan]PROBE[/cyan] No card in gripor")
                             if line.find("filament detected") != -1:
                                 CARD_IN_GRIPOR = True
                                 self.card_sensor_future.set_result(True)
-                                self.log_general("[cyan]PROBE[/cyan] Card in gripor")
+                                self.log_general.write("[cyan]PROBE[/cyan] Card in gripor")
+                        if self.command_future and not self.command_future.done():
+                            n = line.find("macro_complete:")
+                            if n != -1:
+                                which = line[n + len("macro_complete:"):]
+                                self.log_general.write(f"macro_complete! which={which}")
+                                if self.command_future.which == which:
+                                    self.log_general.write(f"macro_complete: set result = {which}")
+                                    self.command_future.set_result(which)
+
         except Exception as wtf:
-            self.log_general.write(f"Exception WTF {wtf}")
+            self.log_general.write(traceback.format_exc())
         except BlockingIOError:
             pass # does it even happen?
         except OSError as e:
@@ -427,10 +479,17 @@ class TextualRobotnik(App):
                 lslots = range(1, 1 + len(robot_get_slots()))
             else:
                 lslots = [slots]
-        #raise Exception(f"lslots={lslots}")
+
+        self.ABORTED = False
+        self.disable_all_buttons(disable=True)
+        self.activate_abort_button(activate=True)
 
         lslots = [int(x) for x in lslots]
         for n in lslots:
+            if self.ABORTED:
+                self.activate_abort_button(activate=False)
+                break
+            self.update_status(f"CHECK SLOT {n}")
             self.set_card_busy(n, busy=True)
             self.send_command(cmd_get(['get', n]))
             await asyncio.sleep(0.2)
@@ -438,16 +497,18 @@ class TextualRobotnik(App):
             await asyncio.sleep(0.2)
             self.card_sensor_future = asyncio.get_running_loop().create_future()
             self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
-            #await asyncio.sleep(0.2)
             await self.card_sensor_future
             if self.card_sensor_future.result():
                 self.log_general.write(f"[cyan][+][/cyan] Card present in slot {n}")
-                self.send_command(cmd_put(['put', n]))
+                await self.send_command_future(cmd_put(['put', n]), 'put')
                 self.set_card_present(n, present=True)
             else:
                 self.send_command("GRIPOR_OPEN")
                 self.set_card_present(n, present=False)
             self.set_card_busy(n, busy=False)
+
+        self.update_status("READY")
+        self.disable_all_buttons(disable=False)
 
     @work(exclusive=True)
     async def adjust_slot_sequence(self, slots=0):
@@ -459,19 +520,31 @@ class TextualRobotnik(App):
             else:
                 lslots = [slots]
 
+        self.ABORTED = False
+        self.activate_abort_button(activate=False)
+        self.disable_mount_buttons(disable=True)
+
         self.send_command("GRIPOR_CLOSE\nM400")
         lslots = [int(x) for x in lslots]
         for n in lslots:
+            if self.ABORTED:
+                self.activate_abort_button(activate=False)
+                break
+            self.update_status(f"ADJUSTING SLOT {n}")
             self.set_card_busy(n, busy=True)
-            self.send_command(adjust_card_in_slot(['adjust', n]))
+            await self.send_command_future(adjust_card_in_slot(['adjust', n]), 'adjust')
             self.set_card_busy(n, busy=False)
+        self.send_command(move_to_slot(['slot', n]))
         self.send_command("GRIPOR_OPEN")
+
+        self.update_status("READY")
+        self.disable_mount_buttons(disable=False)
 
 
     def set_card_busy(self, slot, busy=True):
         if slot > 0:
             check_btn = self.query_one(f"#check{slot}")
-            self.blinker = self.set_interval(0.5, partial(self.busy_animation, check_btn))
+            self.blinker = self.set_interval(0.5, partial(self.busy_animation_cb, check_btn))
             if busy:
                 check_btn.add_class("busy")
             else:
@@ -498,49 +571,72 @@ class TextualRobotnik(App):
     def disable_all_buttons(self, disable: bool) -> None:
         for patonki in self.query("Button"):
             patonki.disabled = disable
+        self.activate_abort_button(activate=False)
+
+    def activate_abort_button(self, activate: bool) -> None:
+        abort = self.query_one("#svc-abort")
+        abort.disabled = not activate
+
+    def update_status(self, msg: str) -> None:
+        self.log_general.write(f"[cyan]STATUS[/cyan] {msg}")
+        self.query_one("#svc-status").update(msg)
 
     def go_offline(self) -> None:
         # disable controls
         self.disable_all_buttons(disable=True)
-        # todo: close descriptors, start polling
+        self.close_pipes()
+
+        if self.reopen_timer == None:
+            self.reopen_timer = self.set_interval(5.0, self.open_pipes)
+
+    def send_command_future(self, cmd, which):
+        self.command_future = asyncio.get_running_loop().create_future()
+        self.command_future.which = which
+        self.send_command(cmd)
+        return self.command_future
 
     @work(exclusive=True)
     async def mount_slot_sequence(self, slot=0):
         global MOUNTED
         slot = int(slot)
         if MOUNTED != 0 and MOUNTED != slot:
-            self.log_general.write(f"[red][+][/red] Card {MOUNTED} is mounted, dismount first.")
-            return
+            #self.log_general.write(f"[red][+][/red] Card {MOUNTED} is mounted, dismount first.")
+            #return
+            dismo_instance = self.dismount_slot_sequence()
+            await dismo_instance.wait()
 
         if MOUNTED == slot:
             self.log_general.write(f"[red][+][/red] Card already mounted.")
             return
 
-        self.disable_mount_buttons(disable=True)
+        self.update_status(f"MOUNTING CARD {slot}")
+        self.disable_all_buttons(disable=True)
+        try:
+            n = slot
+            self.set_card_busy(slot, busy=True)
+            dismo_btn = self.query_one(f"#dismount")
 
-        n = slot
-        self.set_card_busy(slot, busy=True)
-        dismo_btn = self.query_one(f"#dismount")
-
-        self.send_command(cmd_get(['get', n]))
-        await asyncio.sleep(0.2)
-        self.send_command(move_to_slot(['slot', 0]))
-        await asyncio.sleep(0.2)
-        self.card_sensor_future = asyncio.get_running_loop().create_future()
-        self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
-        await self.card_sensor_future
-        if self.card_sensor_future.result():
-            self.log_general.write(f"[cyan][+][/cyan] Card in gripor")
-            self.send_command(cmd_put(['put', 0]))
-            self.set_card_present(slot, present=True)
-            dismo_btn.disabled = False
-            MOUNTED = n
-        else:
-            self.log_general.write(f"[red][+][/red] No card")
-            self.send_command("GRIPOR_OPEN")
-            self.set_card_present(slot, present=False)
-            self.disable_mount_buttons(disable=False)
-        self.set_card_busy(slot, busy=False)
+            self.send_command(cmd_get(['get', n]))
+            await asyncio.sleep(0.2)
+            self.send_command(move_to_slot(['slot', 0]))
+            await asyncio.sleep(0.2)
+            self.card_sensor_future = asyncio.get_running_loop().create_future()
+            self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
+            await self.card_sensor_future
+            if self.card_sensor_future.result():
+                self.log_general.write(f"[cyan][+][/cyan] Card in gripor")
+                self.set_card_present(slot, present=True)
+                await self.send_command_future(cmd_put(['put', 0]), 'put')
+                dismo_btn.disabled = False
+                MOUNTED = n
+            else:
+                self.log_general.write(f"[red][+][/red] No card")
+                self.send_command("GRIPOR_OPEN")
+                self.set_card_present(slot, present=False)
+            self.set_card_busy(slot, busy=False)
+        finally:
+            self.update_status("READY")
+            self.disable_all_buttons(disable=False)
 
     @work(exclusive=True)
     async def dismount_slot_sequence(self):
@@ -552,15 +648,19 @@ class TextualRobotnik(App):
         dismo_btn = self.query_one(f"#dismount")
         dismo_btn.disabled = True
 
-        self.send_command(cmd_get(['get', 0]))
-        await asyncio.sleep(0.2)
-        self.send_command(cmd_put(['put', MOUNTED]))
-        await asyncio.sleep(0.2)
-        MOUNTED = 0
-        self.disable_mount_buttons(disable=False)
+        self.disable_all_buttons(disable=True)
+        self.update_status(f"DISMOUNTING CARD {MOUNTED}")
+        try:
+            self.set_card_busy(MOUNTED, busy=True)
+            await self.send_command_future(cmd_get(['get', 0]), which='get')
+            await self.send_command_future(cmd_put(['put', MOUNTED]), which='put')
+            self.set_card_busy(MOUNTED, busy=False)
+            MOUNTED = 0
+            self.disable_all_buttons(disable=False)
+        finally:
+            self.update_status("READY")
 
-
-    def busy_animation(self, btn):
+    def busy_animation_cb(self, btn):
         if btn.has_class("blunk"):
             btn.remove_class("blunk")
         else:
@@ -578,6 +678,9 @@ class TextualRobotnik(App):
             self.dismount_slot_sequence()
         if event.button.id == "btn-rescan":
             self.read_media_dir()
+        if event.button.id == "svc-abort":
+            self.update_status("ABORTING")
+            self.ABORTED = True
         if event.button.id == "svc-rehome":
             self.send_command("G28")
         if event.button.id == "svc-check-all":

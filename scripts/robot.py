@@ -9,6 +9,8 @@ import configparser
 
 CARD_X = 5
 CARD_Y = 23
+Y_FULL_RETRACT = 5      # safe Y to move gripor with card
+Y_ADJ_RETRACT = 15      # for moving without card
 CARD_Y_INSERT = 23
 CARD_Y_STORE = 18
 SPEED_FULL = 18000
@@ -138,7 +140,7 @@ def move_to_slot(args):
     n, xpos = get_slot(args, "move_to_slot")
     if n >= 0 and xpos >= 0:
         return f"""
-G1 Y5 F{SPEED_FULL}
+G1 Y{Y_FULL_RETRACT} F{SPEED_FULL}
 G1 X{xpos} F{SPEED_FULL}
 """
     else:
@@ -154,6 +156,7 @@ G1 Y{CARD_Y_INSERT}
 G4 P100
 GRIPOR_CLOSE
 G1 Y5
+RESPOND TYPE=echo MSG="macro_complete:get"
 '''
 
 def put_to_reader():
@@ -170,16 +173,29 @@ G1 Y22 F1000     ; push in
 G4 P250
 G1 Y5 F{SPEED_FULL}
 GRIPOR_OPEN
+RESPOND TYPE=echo MSG="macro_complete:put"
 '''
+
+def move_to_slot_adj(args):
+    n, xpos = get_slot(args, "move_to_slot")
+    if n >= 0 and xpos >= 0:
+        return f"""
+G1 Y{Y_ADJ_RETRACT} F{SPEED_FULL}
+G1 X{xpos} F{SPEED_FULL}
+"""
+    else:
+        return ""
 
 def adjust_card_in_slot(args):
     text = ''
     if len(args) > 1:
-        text = move_to_slot(args)
+        text = move_to_slot_adj(args)
     return text + f'''
-G1 Y5 F{SPEED_FULL}
+G1 Y{Y_ADJ_RETRACT} F{SPEED_FULL}
 G1 Y{CARD_Y_STORE-3} F1000     ; push in slightly
-G1 Y5 F{SPEED_FULL/4}
+G1 Y{Y_ADJ_RETRACT} F{SPEED_FULL/4}
+M400
+RESPOND TYPE=echo MSG="macro_complete:adjust"
 '''
 
 def put_to_store(args):
@@ -218,6 +234,7 @@ G1 Y{CARD_Y_STORE-3} F1000     ; push in slightly
 ;
 G1 Y5 F{SPEED_FULL/4}
 GRIPOR_OPEN
+RESPOND TYPE=echo MSG="macro_complete:put"
 '''
 
 def get_from_store(args):
@@ -231,6 +248,7 @@ G4 P100
 G1 Y{CARD_Y_STORE}
 GRIPOR_CLOSE
 G1 Y5
+RESPOND TYPE=echo MSG="macro_complete:get"
 '''
 
 def cmd_get(args):
