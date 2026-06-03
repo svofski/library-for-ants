@@ -21,6 +21,9 @@ CARD_IN_GRIPOR = False
 MOUNTED = 0
 MOUNTED_UUID = ""
 
+GUI_COMMANDS = ['exit', 'quit', 'feckov', 'check', 'mount', 'dismount']
+
+
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
     parser.add_argument("-c", "--config", default="config.ini", help="Path to INI file")
@@ -30,7 +33,7 @@ def parse_config_and_args():
     config = configparser.ConfigParser()
     if os.path.exists(args.config):
         config.read(args.config)
-    
+
     pipe_path = args.pipe if args.pipe else config.get("klipper", "pipe_path", fallback="/tmp/printer")
 
     read_robot_config(config)
@@ -69,7 +72,7 @@ class Logger:
             else:
                 log_widget.write(message)
 
-    
+
 
 class TextualRobotnik(App):
     CSS = """
@@ -92,6 +95,12 @@ class TextualRobotnik(App):
     }
     Button.slot {
         background: #222;
+        min-width: 8;
+        width: 100%;
+    }
+    Button.mount-button {
+        min-width: 8;
+        width: 100%;
     }
     Button.slot.present {
         background: orange;
@@ -116,10 +125,12 @@ class TextualRobotnik(App):
     Button.service-button {
         background: #404;
         color: yellow;
+        min-width: 8;
+        margin: 1;
     }
 
     """
-    
+
     BINDINGS = [
         ("q", "quit", "Quit Application"),
         ("ctrl+c", "quit", "Quit")
@@ -141,7 +152,7 @@ class TextualRobotnik(App):
     def log_commands_help(self):
         macros = ' '.join([x for x in robot_macros])
         self.log_write(f"[bold green][+][/bold green] MACROS: [bold yellow]{macros}[/bold yellow]")
-        cmds = ' '.join([x for x in robot_commands.keys()])
+        cmds = ' '.join([x for x in list(robot_commands.keys()) + GUI_COMMANDS])
         self.log_write(f"[bold green][+][/bold green] COMMANDS: [bold yellow]{cmds}[/bold yellow]")
 
     def compose(self) -> ComposeResult:
@@ -159,7 +170,7 @@ class TextualRobotnik(App):
                 with Vertical():
                     yield Static("Reader", shrink=True)
                     yield Button("Rescan", id="btn-rescan", classes="slot online")
-                    yield Button("Dismount", id="dismount", classes="mount", disabled=True)
+                    yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
             with Horizontal():
                 yield Button("REHOME", id="svc-rehome", classes="service-button")
                 yield Button("CHECK ALL", id="svc-check-all", classes="service-button")
@@ -172,9 +183,7 @@ class TextualRobotnik(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.log_write("[bold green][+][/bold green] Starting TUI environment...")
-
-        # 1. Open the non-blocking read descriptor
+        # read from klipper
         try:
             self.pipe_fd = os.open(self.pipe_path, os.O_RDONLY | os.O_NONBLOCK)
             self.log_write(f"[bold green][+][/bold green] Connected to read pipe: {self.pipe_path}")
@@ -198,9 +207,7 @@ class TextualRobotnik(App):
         loop = asyncio.get_running_loop()
         loop.add_reader(udev_fd, self.handle_udev_read)
 
-        self.log_write("[green][+][/green] Hardware hotplug subsystem online.")
-
-        # 2. Open the write stream channel
+        # write to klipper
         try:
             self.pipe_writer = open(self.pipe_path, "w", encoding="utf-8", buffering=1)
 
@@ -218,10 +225,9 @@ class TextualRobotnik(App):
             self.log_write(f"[bold red][-] Failed to open write pipe:[/bold red] {e}")
             return
 
-        # klipper pipe
+        # klipper async reader
         loop = asyncio.get_running_loop()
         loop.add_reader(self.pipe_fd, self.handle_pipe_read)
-        self.log_write("[bold green][+][/bold green] Async loop stream processing engine attached.")
 
 		# volumes monitor
         self.track_volumes()
@@ -230,6 +236,8 @@ class TextualRobotnik(App):
         self.query_one(Input).focus()
 
     def handle_pipe_read(self) -> None:
+        global HOMED, CARD_IN_GRIPOR
+
         try:
             ready_data = os.read(self.pipe_fd, 4096)
             if ready_data:
@@ -239,7 +247,8 @@ class TextualRobotnik(App):
                     line = line.strip()
                     if line:
                         # Append directly into our scrollable TUI panel log view
-                        #self.log_klipper.write(f"[cyan][KLIPPER][/cyan] {line}")
+                        if line != "ok":
+                            self.log_klipper.write(f"[cyan][KLIPPER][/cyan] {line}")
                         if line.find("AXIS_STATUS: READY") != -1:
                             HOMED = True
                         if line.find("AXIS_STATUS: UNHOMED") != -1:
@@ -248,6 +257,10 @@ class TextualRobotnik(App):
                         if line.find("Must home axes first") != -1:
                             HOMED = False
                             self.send_command("G28")
+                        if line.find("Lost communication with MCU") != -1 or line.find("Klipper state: Shutdown") != -1:
+                            self.go_offline()
+                            HOMED = False
+                            CARD_IN_GRIPOR = False
                         if self.card_sensor_future and not self.card_sensor_future.done():
                             if line.find("filament not detected") != -1:
                                 CARD_IN_GRIPOR = False
@@ -257,8 +270,10 @@ class TextualRobotnik(App):
                                 CARD_IN_GRIPOR = True
                                 self.card_sensor_future.set_result(True)
                                 self.log_general("[cyan]PROBE[/cyan] Card in gripor")
+        except Exception as wtf:
+            self.log_general.write(f"Exception WTF {wtf}")
         except BlockingIOError:
-            pass # does it even happen? 
+            pass # does it even happen?
         except OSError as e:
             self.log_write(f"[bold red][-] Run-time read exception encountered:[/bold red] {e}")
 
@@ -301,7 +316,7 @@ class TextualRobotnik(App):
             self.mount_slot_sequence(n)
             input_widget.value = ""
             return
-        
+
         if cmd.lower().split()[0] == 'dismount':
             self.log_general.write(f"[cyan]Running dismount_slot_sequence()[/cyan]")
             self.dismount_slot_sequence()
@@ -342,7 +357,7 @@ class TextualRobotnik(App):
         #self.log_write(f"[bold green][+ UDEV][/bold green] Node: {device.device_node} Action: {device.action} robot.bd: {BLOCK_DEVICE}")
         if device and BLOCK_DEVICE in device.device_node:
             action = device.action # 'add', 'remove', or 'change'
-            
+
             if action == "add":
                 self.log_write(f"[bold green][+ CARD ADD][/bold green] Node: {device.device_node}")
                 self.set_timer(2.0, lambda: self.call_next(self.read_media_dir))
@@ -356,7 +371,7 @@ class TextualRobotnik(App):
         # Get initial snapshot
         try:
             last_parts = {p.mountpoint: p.device for p in psutil.disk_partitions(all=False)}
-            self.call_from_thread(self.log_write, f"last_parts={repr(last_parts)}")
+            #self.call_from_thread(self.log_write, f"last_parts={repr(last_parts)}")
         except Exception as e:
             self.call_from_thread(self.log_write, f"ininital Exception: {e}")
             last_parts = {}
@@ -364,7 +379,7 @@ class TextualRobotnik(App):
         worker = get_current_worker()
         while not worker.is_cancelled:
             time.sleep(2.0)
-            
+
             try:
                 current_parts = {p.mountpoint: p.device for p in psutil.disk_partitions(all=False)}
             except Exception as e:
@@ -480,6 +495,15 @@ class TextualRobotnik(App):
         for patonki in self.query('.mount-button'):
             patonki.disabled = disable
 
+    def disable_all_buttons(self, disable: bool) -> None:
+        for patonki in self.query("Button"):
+            patonki.disabled = disable
+
+    def go_offline(self) -> None:
+        # disable controls
+        self.disable_all_buttons(disable=True)
+        # todo: close descriptors, start polling
+
     @work(exclusive=True)
     async def mount_slot_sequence(self, slot=0):
         global MOUNTED
@@ -515,7 +539,7 @@ class TextualRobotnik(App):
             self.log_general.write(f"[red][+][/red] No card")
             self.send_command("GRIPOR_OPEN")
             self.set_card_present(slot, present=False)
-            self.disable_mount_buttons(disable=false)
+            self.disable_mount_buttons(disable=False)
         self.set_card_busy(slot, busy=False)
 
     @work(exclusive=True)
