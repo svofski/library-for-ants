@@ -209,29 +209,9 @@ G1 Y{CARD_Y_STORE}
 G4 P100
 GRIPOR_OPEN
 
-;; G1 Y{CARD_Y_STORE-2}
-;; GRIPOR_CLOSE
-;; G1 Y{CARD_Y_STORE}
-;; GRIPOR_OPEN
-;; 
-;; ;G1 Y{CARD_Y_STORE-2}
-;; ;GRIPOR_CLOSE
-;; ;G1 Y{CARD_Y_STORE}
-;; ;GRIPOR_OPEN
- 
 G1 Y14      ; retract to close the beak
 GRIPOR_CLOSE
 G1 Y{CARD_Y_STORE-3} F1000     ; push in slightly
-; G4 P250
-; ; wiggle wiggle wiggle
-;  G91
-;  G1 X0.5 F250
-;  G1 X-1
-;  G1 X1
-;  G1 X-0.5
-;  G90
-;  M400
-;
 G1 Y5 F{SPEED_FULL/4}
 GRIPOR_OPEN
 RESPOND TYPE=echo MSG="macro_complete:put"

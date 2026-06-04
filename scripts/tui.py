@@ -23,6 +23,15 @@ MOUNTED_UUID = ""
 
 GUI_COMMANDS = ['exit', 'quit', 'feckov', 'check', 'mount', 'dismount']
 
+LOG_NADA =  "        "
+LOG_INFO =  "[bold green]INFO[/bold green]    "
+LOG_ERROR = "[bold red]ERROR[/bold red]   "
+LOG_MEDIA = "[bold yellow]MEDIA[/bold yellow]   "
+LOG_STATUS = "[cyan]STATUS[/cyan]  "
+LOG_SENSOR = "[blue]SENSOR[/blue]  "
+
+LOG_KLIPPER = "[cyan]KLIPPER[/cyan] "
+LOG_COMMAND = "[blue]GCODE[/blue]   "
 
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
@@ -48,7 +57,8 @@ class Logger:
         self.repeats = 0
         self.max_lines = 200
 
-    def write(self, message: str) -> None:
+    def write(self, message: str, prefix: str = LOG_NADA) -> None:
+        message = prefix + message
         log_widget = self.app.query_one(f"#{self.id}", RichLog)
         if self.history and len(self.history) > 0 and self.history[-1] == message:
             self.repeats += 1
@@ -119,12 +129,12 @@ class TextualRobotnik(App):
         color: black;
     }
     Button#dismount {
-        background: red;
-        color: yellow;
+        background: gray;
+        color: black;
     }
     Button.service-button {
-        background: #424;
-        color: yellow;
+        background: gray;
+        color: black;
         min-width: 8;
         margin: 1;
     }
@@ -132,13 +142,17 @@ class TextualRobotnik(App):
         background: red;
     }
     .status-label {
-        background: #144;
-        color: white;
+        background: #222;
+        color: gray;
         min-width: 30;
         height: 3;
         margin: 1;
         content-align: center middle;
         width: 1fr;
+    }
+    .status-label.active {
+        background: orange;
+        color: black;
     }
     """
 
@@ -156,15 +170,16 @@ class TextualRobotnik(App):
         self.log_general = Logger(self, "general_log")
         self.log_klipper = Logger(self, "klipper_log")
         self.card_sensor_future = None
+        self.blinker = None
 
     def log_write(self, msg: str) -> None:
         self.log_general.write(msg)
 
     def log_commands_help(self):
         macros = ' '.join([x for x in robot_macros])
-        self.log_write(f"[bold green][+][/bold green] MACROS: [bold yellow]{macros}[/bold yellow]")
+        self.log_general.write(f"MACROS: [bold yellow]{macros}[/bold yellow]", LOG_INFO)
         cmds = ' '.join([x for x in list(robot_commands.keys()) + GUI_COMMANDS])
-        self.log_write(f"[bold green][+][/bold green] COMMANDS: [bold yellow]{cmds}[/bold yellow]")
+        self.log_general.write(f"COMMANDS: [bold yellow]{cmds}[/bold yellow]", LOG_INFO)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -197,9 +212,9 @@ class TextualRobotnik(App):
         # read from klipper
         try:
             self.pipe_fd = os.open(self.pipe_path, os.O_RDONLY | os.O_NONBLOCK)
-            self.log_write(f"[bold green][+][/bold green] Connected to read pipe: {self.pipe_path}")
+            self.log_general.write(f"Connected to read pipe: {self.pipe_path}", LOG_INFO)
         except OSError as e:
-            self.log_write(f"[bold red][-] Failed to open read pipe:[/bold red] {e}")
+            self.log_general.write(f"Failed to open read pipe: {e}", LOG_ERROR)
             return
 
         # write to klipper
@@ -211,17 +226,17 @@ class TextualRobotnik(App):
                     self.pipe_writer.write(f"STATUS\n")
                     self.pipe_writer.flush()
                 except OSError as e:
-                    self.log_write(f"[bold red][-] Write failure down active pipe matrix:[/bold red] {e}")
+                    self.log_general.write(f"Write failure down active pipe matrix:[/bold red] {e}", LOG_ERROR)
                     self.close_pipes()
                     return
             else:
-                self.log_write("[bold red][-] Connection writing pipe context unavailable.[/bold red]")
+                self.log_general.write("Connection writing pipe context unavailable.[/bold red]", LOG_ERROR)
                 self.close_pipes()
                 return
 
         except OSError as e:
             self.close_pipes()
-            self.log_write(f"[bold red][-] Failed to open write pipe:[/bold red] {e}")
+            self.log_general.write(f"[bold red][-] Failed to open write pipe:[/bold red] {e}", LOG_ERROR)
             return
 
         # klipper async reader
@@ -249,8 +264,8 @@ class TextualRobotnik(App):
     def on_mount(self) -> None:
         self.reopen_timer = None
         self.ABORTED = False
-        self.log_write(f"[bold green][+][/bold green] READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} SLOTS={robot_get_slots()}")
-        self.log_write(f"[bold green][+][/bold green] BLOCK_DEVICE={robot_get_block_device()} MNT={robot_get_mount_point()}")
+        self.log_general.write(f"READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} SLOTS={robot_get_slots()}", LOG_INFO)
+        self.log_general.write(f"BLOCK_DEVICE={robot_get_block_device()} MNT={robot_get_mount_point()}", LOG_INFO)
         self.log_commands_help()
 
         robot_set_logger(self.log_write)
@@ -288,7 +303,7 @@ class TextualRobotnik(App):
                     if line:
                         # Append directly into our scrollable TUI panel log view
                         if line != "ok":
-                            self.log_klipper.write(f"[cyan][KLIPPER][/cyan] {line}")
+                            self.log_klipper.write(line, LOG_KLIPPER)
                         if line.find("AXIS_STATUS: READY") != -1:
                             HOMED = True
                         if line.find("AXIS_STATUS: UNHOMED") != -1:
@@ -308,18 +323,17 @@ class TextualRobotnik(App):
                             if line.find("filament not detected") != -1:
                                 CARD_IN_GRIPOR = False
                                 self.card_sensor_future.set_result(False)
-                                self.log_general.write("[cyan]PROBE[/cyan] No card in gripor")
+                                self.log_general.write("No card in gripor", LOG_SENSOR)
                             if line.find("filament detected") != -1:
                                 CARD_IN_GRIPOR = True
                                 self.card_sensor_future.set_result(True)
-                                self.log_general.write("[cyan]PROBE[/cyan] Card in gripor")
+                                self.log_general.write("Card in gripor", LOG_SENSOR)
                         if self.command_future and not self.command_future.done():
                             n = line.find("macro_complete:")
                             if n != -1:
                                 which = line[n + len("macro_complete:"):]
-                                self.log_general.write(f"macro_complete! which={which}")
                                 if self.command_future.which == which:
-                                    self.log_general.write(f"macro_complete: set result = {which}")
+                                    #self.log_general.write(f"macro_complete: set result = {which}")
                                     self.command_future.set_result(which)
 
         except Exception as wtf:
@@ -327,7 +341,7 @@ class TextualRobotnik(App):
         except BlockingIOError:
             pass # does it even happen?
         except OSError as e:
-            self.log_write(f"[bold red][-] Run-time read exception encountered:[/bold red] {e}")
+            self.log_general.write(f"Run-time read exception encountered: {e}", LOG_ERROR)
 
     def send_command(self, cmd: str) -> None:
         cmd = cmd.strip()
@@ -336,13 +350,13 @@ class TextualRobotnik(App):
 
         if self.pipe_writer:
             try:
-                self.log_klipper.write(f"[bold magenta]{cmd}[/bold magenta]")
+                self.log_klipper.write(cmd, LOG_COMMAND)
                 self.pipe_writer.write(f"{cmd}\n")
                 self.pipe_writer.flush()
             except OSError as e:
-                self.log_write(f"[bold red][-] Write failure down active pipe: [/bold red] {e}")
+                self.log_general.write(f"Write failure down active pipe: {e}", LOG_ERROR)
         else:
-            self.log_write("[bold red][-] Connection writing pipe context unavailable.[/bold red]")
+            self.log_general.write("Connection writing pipe context unavailable.", LOG_ERROR)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         cmd = event.value.strip()
@@ -357,20 +371,17 @@ class TextualRobotnik(App):
 
         if cmd.lower().split()[0] == 'check':
             n,x = get_slot(cmd.lower().split())
-            self.log_general.write(f"[cyan]Running check_slot_sequence()[/cyan]")
             self.check_slot_sequence(n)
             input_widget.value = ""
             return
 
         if cmd.lower().split()[0] == 'mount':
             n,x = get_slot(cmd.lower().split())
-            self.log_general.write(f"[cyan]Running mount_slot_sequence()[/cyan]")
             self.mount_slot_sequence(n)
             input_widget.value = ""
             return
 
         if cmd.lower().split()[0] == 'dismount':
-            self.log_general.write(f"[cyan]Running dismount_slot_sequence()[/cyan]")
             self.dismount_slot_sequence()
             input_widget.value = ""
             return
@@ -381,7 +392,7 @@ class TextualRobotnik(App):
             if cmdproc:
                 cmd = cmdproc(cmd.split())
         except Exception as e:
-            self.log_write(f"Exception in cmdproc: {e}")
+            self.log_general.write(f"Exception in cmdproc: {e}", LOG_ERROR)
 
         input_widget.value = ""
 
@@ -406,24 +417,22 @@ class TextualRobotnik(App):
     def handle_udev_read(self) -> None:
         device = self.monitor.poll(timeout=0)
 
-        #self.log_write(f"[bold green][+ UDEV][/bold green] Node: {device.device_node} Action: {device.action} robot.bd: {BLOCK_DEVICE}")
         if device and BLOCK_DEVICE in device.device_node:
             action = device.action # 'add', 'remove', or 'change'
 
             if action == "add":
-                self.log_write(f"[bold green][+ CARD ADD][/bold green] Node: {device.device_node}")
+                self.log_general.write(f"CARD ADD Node: {device.device_node}", LOG_MEDIA)
                 self.set_timer(2.0, lambda: self.call_next(self.read_media_dir))
             elif action == "remove":
-                self.log_write(f"[bold red][- CARD REMOVE][/bold red] Node: {device.device_node}")
+                self.log_general.write(f"CARD REMOVE Node: {device.device_node}", LOG_MEDIA)
             elif action == "change":
-                self.log_write(f"[bold red][- CARD CHANGE][/bold red] Node: {device.device_node}")
+                self.log_general.write(f"CARD REMOVE Node: {device.device_node}", LOG_MEDIA)
 
     @work(thread=True, exclusive=True)
     def track_volumes(self) -> None:
         # Get initial snapshot
         try:
             last_parts = {p.mountpoint: p.device for p in psutil.disk_partitions(all=False)}
-            #self.call_from_thread(self.log_write, f"last_parts={repr(last_parts)}")
         except Exception as e:
             self.call_from_thread(self.log_write, f"ininital Exception: {e}")
             last_parts = {}
@@ -499,7 +508,7 @@ class TextualRobotnik(App):
             self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
             await self.card_sensor_future
             if self.card_sensor_future.result():
-                self.log_general.write(f"[cyan][+][/cyan] Card present in slot {n}")
+                self.log_general.write(f"Card present in slot {n}", LOG_MEDIA)
                 await self.send_command_future(cmd_put(['put', n]), 'put')
                 self.set_card_present(n, present=True)
             else:
@@ -544,13 +553,13 @@ class TextualRobotnik(App):
     def set_card_busy(self, slot, busy=True):
         if slot > 0:
             check_btn = self.query_one(f"#check{slot}")
-            self.blinker = self.set_interval(0.5, partial(self.busy_animation_cb, check_btn))
             if busy:
                 check_btn.add_class("busy")
+                self.blinker = self.set_interval(0.5, partial(self.busy_animation_cb, check_btn))
+                self.blinker.resume()
             else:
-                if self.blinker != None:
+                if self.blinker:
                     self.blinker.stop()
-                    self.blinker = None
                 check_btn.remove_class("blunk")
                 check_btn.remove_class("busy")
 
@@ -578,8 +587,13 @@ class TextualRobotnik(App):
         abort.disabled = not activate
 
     def update_status(self, msg: str) -> None:
-        self.log_general.write(f"[cyan]STATUS[/cyan] {msg}")
-        self.query_one("#svc-status").update(msg)
+        self.log_general.write(msg, LOG_STATUS)
+        lable = self.query_one("#svc-status")
+        lable.update(msg)
+        if msg == "READY":
+            lable.remove_class("active")
+        else:
+            lable.add_class("active")
 
     def go_offline(self) -> None:
         # disable controls
@@ -600,13 +614,11 @@ class TextualRobotnik(App):
         global MOUNTED
         slot = int(slot)
         if MOUNTED != 0 and MOUNTED != slot:
-            #self.log_general.write(f"[red][+][/red] Card {MOUNTED} is mounted, dismount first.")
-            #return
             dismo_instance = self.dismount_slot_sequence()
             await dismo_instance.wait()
 
         if MOUNTED == slot:
-            self.log_general.write(f"[red][+][/red] Card already mounted.")
+            self.log_general.write("Card already mounted.", LOG_MEDIA)
             return
 
         self.update_status(f"MOUNTING CARD {slot}")
@@ -624,13 +636,11 @@ class TextualRobotnik(App):
             self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
             await self.card_sensor_future
             if self.card_sensor_future.result():
-                self.log_general.write(f"[cyan][+][/cyan] Card in gripor")
                 self.set_card_present(slot, present=True)
                 await self.send_command_future(cmd_put(['put', 0]), 'put')
                 dismo_btn.disabled = False
                 MOUNTED = n
             else:
-                self.log_general.write(f"[red][+][/red] No card")
                 self.send_command("GRIPOR_OPEN")
                 self.set_card_present(slot, present=False)
             self.set_card_busy(slot, busy=False)
@@ -642,7 +652,7 @@ class TextualRobotnik(App):
     async def dismount_slot_sequence(self):
         global MOUNTED
         if MOUNTED == 0:
-            self.log_general.write(f"[red][+][/red] Not mounted.")
+            self.log_general.write(f"Not mounted.", LOG_MEDIA)
             return
 
         dismo_btn = self.query_one(f"#dismount")
@@ -661,6 +671,7 @@ class TextualRobotnik(App):
             self.update_status("READY")
 
     def busy_animation_cb(self, btn):
+        #self.log_general.write(f"busy_animation_cb {btn}", LOG_INFO)
         if btn.has_class("blunk"):
             btn.remove_class("blunk")
         else:
@@ -692,7 +703,7 @@ class TextualRobotnik(App):
         try:
             files = await asyncio.to_thread(os.listdir, robot_get_mount_point())
             self.query_one(DirectoryTree).reload()
-            self.log_write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}")
+            self.log_general.write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}", LOG_MEDIA)
         except OSError:
             self.notify("Drive was not ready", severity="error")
 
