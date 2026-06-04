@@ -1,3 +1,5 @@
 textual
+textual-canvas
 pyudev
 psutil
+pypng

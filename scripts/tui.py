@@ -5,13 +5,18 @@ import argparse
 import configparser
 import asyncio
 import pyudev
+import re
 from functools import partial
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree, Label
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, Middle
 from textual.worker import get_current_worker
 from textual import work
+from textual.color import Color
+from textual_canvas import Canvas
 import psutil
+import png
+from rich.text import Text
 
 from robot import *
 
@@ -32,6 +37,12 @@ LOG_SENSOR = "[blue]SENSOR[/blue]  "
 
 LOG_KLIPPER = "[cyan]KLIPPER[/cyan] "
 LOG_COMMAND = "[blue]GCODE[/blue]   "
+
+LOGO_W = 0
+LOGO_H = 0
+LOGO_BMP = []
+
+SDCARD_ANS = ""
 
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
@@ -85,9 +96,44 @@ class Logger:
 
 
 class TextualRobotnik(App):
+    TITLE = "Library for Ants"
+    SUB_TITLE = "Robotnik v0.1"
     CSS = """
     Vertical {
         margin: 1 2;
+    }
+    #with-canvas-container {
+        height: 20;
+        align-vertical: middle;
+    }
+    #with-canvas-container > Vertical {
+    }
+    #layout-row-1 {
+        height: 14;
+    }
+    #main-buttons-row {
+        height: 14;
+    }
+    #second-buttons-row {
+        height: 5;
+    }
+    #logo {
+        width: 14;
+        height: 14;
+    }
+    #dir-header {
+        height: 2;
+        align: left top;
+    }
+    #mount_label {
+        width: 40;
+        max-width: 40;
+    }
+    #btn-rescan {
+        background: $boost;
+    }
+    .sdcard-graphics {
+        margin-top: 1;
     }
     RichLog {
         background: #000;
@@ -124,6 +170,11 @@ class TextualRobotnik(App):
         background: yellow;
         color: black;
     }
+    Button.slot.busy.blunk:disabled {
+        opacity: 100%;
+        background: yellow;
+        color: black;
+    }
     Button.slot.online {
         background: orange;
         color: black;
@@ -139,6 +190,7 @@ class TextualRobotnik(App):
         margin: 1;
     }
     Button.service-button.abort-button {
+        color: white;
         background: red;
     }
     .status-label {
@@ -182,30 +234,37 @@ class TextualRobotnik(App):
         self.log_general.write(f"COMMANDS: [bold yellow]{cmds}[/bold yellow]", LOG_INFO)
 
     def compose(self) -> ComposeResult:
+        self.sdcard_ansi = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, (0,0,0)))
         yield Header(show_clock=True)
         with Vertical():
-            with Horizontal():
+            with Horizontal(id="with-canvas-container"):
+                with Middle(id="canvas-wrapper"):
+                    yield Canvas(LOGO_W, LOGO_H + (LOGO_H % 2), Color(0,0,0), id="logo")
+                with Vertical():
+                    with Horizontal(id="main-buttons-row"):
+                        for n in range(12,0,-1):
+                            with Vertical():
+                                yield Static(f"Slot {n}", shrink=True)
+                                yield Button("Check", id=f"check{n}", classes="slot")
+                                yield Button("Mount", id=f"mount{n}", classes="mount-button")
+                                yield Static(self.sdcard_ansi, id=f"sdcard{n}", classes="sdcard-graphics")
+                        with Vertical():
+                            yield Static("Reader", shrink=True)
+                            yield Button("CHECK ALL", id="svc-check-all", classes="slot online")
+                            yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
+                    with Horizontal(id="second-buttons-row"):
+                        yield Label("READY", id="svc-status", classes="status-label")
+                        yield Button("ABORT", id="svc-abort", classes="service-button abort-button")
+                        yield Button("REHOME", id="svc-rehome", classes="service-button")
+                        yield Button("ADJUST ALL", id="svc-adj-all", classes="service-button")
+            with Horizontal(id="dir-header"):
+                yield Static(f"{robot_get_block_device()} on {robot_get_mount_point()}: {MOUNTED_UUID}", id="mount_label")
+                yield Button("Rescan", id="btn-rescan", compact=True)
+            yield DirectoryTree(robot_get_mount_point())
+            with Horizontal(id="layout-row-1"):
                 yield RichLog(id="general_log", highlight=True, markup=True, max_lines=200)
                 yield RichLog(id="klipper_log", highlight=True, markup=True, max_lines=200)
-            with Horizontal():
-                for n in range(12,0,-1):
-                    with Vertical():
-                        yield Static(f"Slot {n}", shrink=True)
-                        yield Button("Check", id=f"check{n}", classes="slot")
-                        yield Button("Mount", id=f"mount{n}", classes="mount-button")
-                with Vertical():
-                    yield Static("Reader", shrink=True)
-                    yield Button("Rescan", id="btn-rescan", classes="slot online")
-                    yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
-            with Horizontal():
-                yield Label("READY", id="svc-status", classes="status-label")
-                yield Button("ABORT", id="svc-abort", classes="service-button abort-button")
-                yield Button("REHOME", id="svc-rehome", classes="service-button")
-                yield Button("CHECK ALL", id="svc-check-all", classes="service-button")
-                yield Button("ADJUST ALL", id="svc-adj-all", classes="service-button")
-            yield Static(f"{robot_get_block_device()} on {robot_get_mount_point()}: {MOUNTED_UUID}", id="mount_label")
-            yield DirectoryTree(robot_get_mount_point())
-            yield Input(id="input", placeholder="Type G-code or macro , (e.g., G28, GET_POSITION, CHECK_HOMED, PUT slot, GET slot, GRIPOR_OPEN, GRIPOR_CLOSE) and press Enter...")
+            yield Input(id="input", placeholder="Type G-code or macro and press Enter...")
         yield Footer()
 
     def open_pipes(self):
@@ -221,18 +280,18 @@ class TextualRobotnik(App):
         try:
             self.pipe_writer = open(self.pipe_path, "w", encoding="utf-8", buffering=1)
             # immediately query homed status
-            if self.pipe_writer:
-                try:
-                    self.pipe_writer.write(f"STATUS\n")
-                    self.pipe_writer.flush()
-                except OSError as e:
-                    self.log_general.write(f"Write failure down active pipe matrix:[/bold red] {e}", LOG_ERROR)
-                    self.close_pipes()
-                    return
-            else:
-                self.log_general.write("Connection writing pipe context unavailable.[/bold red]", LOG_ERROR)
-                self.close_pipes()
-                return
+            #if self.pipe_writer:
+            #    try:
+            #        self.pipe_writer.write(f"STATUS\nCHECK_HOMED\n")
+            #        self.pipe_writer.flush()
+            #    except OSError as e:
+            #        self.log_general.write(f"Write failure down active pipe matrix:[/bold red] {e}", LOG_ERROR)
+            #        self.close_pipes()
+            #        return
+            #else:
+            #    self.log_general.write("Connection writing pipe context unavailable.[/bold red]", LOG_ERROR)
+            #    self.close_pipes()
+            #    return
 
         except OSError as e:
             self.close_pipes()
@@ -261,10 +320,30 @@ class TextualRobotnik(App):
             except Exception:
                 pass
 
+    def draw_logo(self) -> None:
+        canvas = self.query_one("#logo")
+        parent_bg = self.query_one("#canvas-wrapper").background_colors[0]
+        canvas.clear(parent_bg)
+
+        color = Color.parse("orange")
+        for y,r in enumerate(LOGO_BMP):
+            for x in range(len(r)):
+                if r[x] != 0:
+                    canvas.set_pixel(x, y, color)
+
+    def on_ready(self) -> None:
+        self.draw_logo()
+        bgcolor = self.query_one("#canvas-wrapper").background_colors[0].rgb
+        self.sdcard_ansi = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, bgcolor))
+        for sd in self.query('.sdcard-graphics'):
+            sd.update(self.sdcard_ansi)
+
     def on_mount(self) -> None:
+        #self.draw_logo()
         self.reopen_timer = None
         self.ABORTED = False
-        self.log_general.write(f"READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} SLOTS={robot_get_slots()}", LOG_INFO)
+        self.log_general.write(f"READER={robot_get_reader_pos()} SPEED_FULL={robot_get_speed_full()} |SLOTS|={len(robot_get_slots())}", LOG_INFO)
+
         self.log_general.write(f"BLOCK_DEVICE={robot_get_block_device()} MNT={robot_get_mount_point()}", LOG_INFO)
         self.log_commands_help()
 
@@ -288,7 +367,17 @@ class TextualRobotnik(App):
         self.open_pipes()
 
         self.disable_all_buttons(True)
+
+        self.send_command("CHECK_HOMED")
         
+    @work(exclusive=True)
+    async def rehome(self) -> None:
+        HOMED = False
+        self.update_status("HOMING")
+        self.disable_all_buttons(disable=True)
+        await self.send_command_future("G28", "homing")
+        self.update_status("READY")
+        self.disable_all_buttons(disable=False)
 
     def handle_pipe_read(self) -> None:
         global HOMED, CARD_IN_GRIPOR
@@ -306,15 +395,15 @@ class TextualRobotnik(App):
                             self.log_klipper.write(line, LOG_KLIPPER)
                         if line.find("AXIS_STATUS: READY") != -1:
                             HOMED = True
-                        if line.find("AXIS_STATUS: UNHOMED") != -1:
-                            HOMED = False
-                            self.send_command("G28")
-                        if line.find("Must home axes first") != -1:
-                            HOMED = False
-                            self.send_command("G28")
-                        if line.find("Klipper state: Ready") != -1:
-                            self.send_command("CHECK_HOMED")
+                            self.update_status("READY")
                             self.disable_all_buttons(disable=False)
+                        if line.find("AXIS_STATUS: UNHOMED") != -1:
+                            self.rehome()
+                        if line.find("Must home axes first") != -1:
+                            self.rehome()
+                        #if line.find("Klipper state: Ready") != -1:
+                        #    self.send_command("CHECK_HOMED")
+                        #    self.disable_all_buttons(disable=False)
                         if line.find("Lost communication with MCU") != -1 or line.find("Klipper state: Shutdown") != -1:
                             self.go_offline()
                             HOMED = False
@@ -568,10 +657,10 @@ class TextualRobotnik(App):
             check_btn = self.query_one(f"#check{slot}")
             if present:
                 check_btn.add_class("present")
-                check_btn.label = "Present"
+                #check_btn.label = "Present"
             else:
                 check_btn.remove_class("present")
-                check_btn.label = "Check"
+                #check_btn.label = "Check"
 
     def disable_mount_buttons(self, disable: bool) -> None:
         for patonki in self.query('.mount-button'):
@@ -678,7 +767,7 @@ class TextualRobotnik(App):
             btn.add_class("blunk")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.log_general.write(f"on_button_pressed id={event.button.id}")
+        #self.log_general.write(f"on_button_pressed id={event.button.id}")
         if event.button.id.startswith("check"):
             slot = event.button.id[len("check"):]
             self.check_slot_sequence(slots=[slot])
@@ -693,7 +782,7 @@ class TextualRobotnik(App):
             self.update_status("ABORTING")
             self.ABORTED = True
         if event.button.id == "svc-rehome":
-            self.send_command("G28")
+            self.rehome()
         if event.button.id == "svc-check-all":
             self.check_slot_sequence(-1)
         if event.button.id == "svc-adj-all":
@@ -707,7 +796,45 @@ class TextualRobotnik(App):
         except OSError:
             self.notify("Drive was not ready", severity="error")
 
+def ansi_to_truecolor(ansi_str: str, bg = (0,0,0), sd = (40,40,100)) -> str:
+    """Converts 4-bit standard ANSI backgrounds and foregrounds to true RGB strings
+
+    so Textual's theme engine cannot override or mutate them.
+    """
+    # Standard mapping for default 16-color terminals
+    
+    sd = (0,0,0)
+    ansi_map = {
+        "30": f"38;2;{sd[0]};{sd[1]};{sd[2]}",      # sdcard colour
+        "37": "38;2;170;170;170",  # FG White
+        "40": f"48;2;{bg[0]};{bg[1]};{bg[2]}",        # BG Black -> Absolute RGB #000000
+        "43": "48;2;170;85;0",     # contacts
+    }
+    
+    def replace_code(match):
+        codes = match.group(1).split(';')
+        new_codes = [ansi_map.get(c, c) for c in codes]
+        return f"\x1b[{';'.join(new_codes)}m"
+
+    # Regex captures sequence formatting values inside \x1b[...m
+    return re.sub(r'\x1b\[([\d;]+)m', replace_code, ansi_str)
+
+
+def load_logo():
+    global LOGO_W, LOGO_H, LOGO_BMP
+    reader = png.Reader(filename="l4a.png")
+    LOGO_W, LOGO_H, LOGO_BMP, info = reader.read()
+
+    global SDCARD_ANS
+    with open("sdcard.ans", "r") as sdcard:
+        SDCARD_ANS = sdcard.read() #hardcode_ansi_to_truecolor(sdcard.read())
+        #print(SDCARD_ANS)
+        #exit()
+	
+
 if __name__ == "__main__":
+    load_logo()
+    #exit()
     target_pipe = parse_config_and_args()
     app = TextualRobotnik(pipe_path=target_pipe)
     app.run()
