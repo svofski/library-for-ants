@@ -16,6 +16,7 @@ from textual.color import Color
 from textual_canvas import Canvas
 import psutil
 import png
+from math import ceil, floor
 from rich.text import Text
 
 from robot import *
@@ -42,7 +43,12 @@ LOGO_W = 0
 LOGO_H = 0
 LOGO_BMP = []
 
-SDCARD_ANS = ""
+SDCARD_ANS = "[]"
+GRIPOR_OPEN_ANS = "|  |"
+GRIPOR_CLOSED_ANS = " || "
+THEME_BGCOLOR = (0,0,0)
+GRIPOR_STATE_OPEN = 0
+GRIPOR_STATE_CLOSED = 1
 
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
@@ -103,7 +109,7 @@ class TextualRobotnik(App):
         margin: 1 2;
     }
     #with-canvas-container {
-        height: 20;
+        height: 30;
         align-vertical: middle;
     }
     #with-canvas-container > Vertical {
@@ -134,6 +140,13 @@ class TextualRobotnik(App):
     }
     .sdcard-graphics {
         margin-top: 1;
+    }
+    .sdcard-graphics.present {
+    }
+    #gripor {
+        overflow: hidden hidden;
+        height: 4;
+        width: 4;
     }
     RichLog {
         background: #000;
@@ -223,6 +236,12 @@ class TextualRobotnik(App):
         self.log_klipper = Logger(self, "klipper_log")
         self.card_sensor_future = None
         self.blinker = None
+        self.gripor_anim_x = 0
+        self.gripor_anim_x_end = 0
+        self.gripor_slot_num = 0
+        self.gripor_state = -1
+        self.gripor_anim_timer = None
+        self.gripor_anim_state_end = GRIPOR_STATE_OPEN
 
     def log_write(self, msg: str) -> None:
         self.log_general.write(msg)
@@ -252,6 +271,7 @@ class TextualRobotnik(App):
                             yield Static("Reader", shrink=True)
                             yield Button("CHECK ALL", id="svc-check-all", classes="slot online")
                             yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
+                    yield Static("GRIPOR", id="gripor")
                     with Horizontal(id="second-buttons-row"):
                         yield Label("READY", id="svc-status", classes="status-label")
                         yield Button("ABORT", id="svc-abort", classes="service-button abort-button")
@@ -332,11 +352,27 @@ class TextualRobotnik(App):
                     canvas.set_pixel(x, y, color)
 
     def on_ready(self) -> None:
+        global THEME_BGCOLOR
         self.draw_logo()
         bgcolor = self.query_one("#canvas-wrapper").background_colors[0].rgb
-        self.sdcard_ansi = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, bgcolor))
+        THEME_BGCOLOR = bgcolor
+        self.sdcard_ansi = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, bg=bgcolor, sd=(40,40,40), contacts=(170,85,0)))
+        self.sdcard_ansi_disabled = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, bg=bgcolor, sd=(0,0,0), contacts=(30,30,30)))
         for sd in self.query('.sdcard-graphics'):
-            sd.update(self.sdcard_ansi)
+            sd.update(self.sdcard_ansi_disabled)
+
+        self.on_resize()
+        self.animate_gripor(0, state=GRIPOR_STATE_OPEN)
+
+        #self.set_card_present(12)
+
+
+    def on_resize(self) -> None:
+        pass
+        #buttons_row = self.query_one("#main-buttons-row")
+        #self.log_general.write(f"buttons_row.width={buttons_row.content_size.width}")
+        #gripor = self.query_one("#gripor")
+        #gripor.styles.offset = (40, 0) #buttons_row.content_size.width - 8
 
     def on_mount(self) -> None:
         #self.draw_logo()
@@ -439,7 +475,7 @@ class TextualRobotnik(App):
 
         if self.pipe_writer:
             try:
-                self.log_klipper.write(cmd, LOG_COMMAND)
+                #self.log_klipper.write(cmd, LOG_COMMAND)
                 self.pipe_writer.write(f"{cmd}\n")
                 self.pipe_writer.flush()
             except OSError as e:
@@ -589,20 +625,24 @@ class TextualRobotnik(App):
                 break
             self.update_status(f"CHECK SLOT {n}")
             self.set_card_busy(n, busy=True)
-            self.send_command(cmd_get(['get', n]))
-            await asyncio.sleep(0.2)
-            self.send_command(move_to_slot(['slot', 0]))
-            await asyncio.sleep(0.2)
+            self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
+            await self.send_command_future(cmd_get(['get', n]), 'get')
+            self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
+            await self.send_command_future(move_to_slot(['slot', 0]), 'slot')
+            
             self.card_sensor_future = asyncio.get_running_loop().create_future()
             self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
             await self.card_sensor_future
             if self.card_sensor_future.result():
                 self.log_general.write(f"Card present in slot {n}", LOG_MEDIA)
+                self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
                 await self.send_command_future(cmd_put(['put', n]), 'put')
                 self.set_card_present(n, present=True)
+                self.animate_gripor(slot=n, state=GRIPOR_STATE_OPEN)
             else:
                 self.send_command("GRIPOR_OPEN")
                 self.set_card_present(n, present=False)
+                self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
             self.set_card_busy(n, busy=False)
 
         self.update_status("READY")
@@ -655,12 +695,15 @@ class TextualRobotnik(App):
     def set_card_present(self, slot, present=True):
         if slot > 0:
             check_btn = self.query_one(f"#check{slot}")
+            gfx = self.query_one(f"#sdcard{slot}")
             if present:
                 check_btn.add_class("present")
-                #check_btn.label = "Present"
+                gfx.add_class("present")
+                gfx.update(self.sdcard_ansi)
             else:
                 check_btn.remove_class("present")
-                #check_btn.label = "Check"
+                gfx.remove_class("present")
+                gfx.update(self.sdcard_ansi_disabled)
 
     def disable_mount_buttons(self, disable: bool) -> None:
         for patonki in self.query('.mount-button'):
@@ -683,6 +726,40 @@ class TextualRobotnik(App):
             lable.remove_class("active")
         else:
             lable.add_class("active")
+
+    def animate_gripor(self, slot, state=GRIPOR_STATE_OPEN) -> None:
+        mainrow = self.query_one("#main-buttons-row")
+        slotcolumn = mainrow.children[12 - slot]
+        x = slotcolumn.region.x - mainrow.region.x + slotcolumn.size.width / 2 - 2
+
+        self.gripor_anim_x = self.gripor_anim_x_end # speedrun current anim
+        self.gripor_anim_x_end = x
+        self.gripor_anim_state_end = state
+        if self.gripor_anim_timer == None:
+            self.gripor_anim_timer = self.set_interval(0.2, self.gripor_anim_frame)
+
+    def gripor_anim_frame(self) -> None:
+        if self.gripor_anim_x != self.gripor_anim_x_end:
+            dx = self.gripor_anim_x_end - self.gripor_anim_x
+            if abs(dx) < 1:
+                self.gripor_anim_x = self.gripor_anim_x_end
+            else:
+                dx = ceil(dx / 3) if dx > 0 else floor(dx / 3)
+                self.gripor_anim_x += dx
+            gripor = self.query_one("#gripor")
+            gripor.styles.offset = (self.gripor_anim_x, 0)
+            gripor.refresh(layout=True)
+        else:
+            gripor = self.query_one("#gripor")
+            if self.gripor_anim_state_end == GRIPOR_STATE_OPEN:
+                gripor.update(Text.from_ansi(ansi_to_truecolor(GRIPOR_OPEN_ANS, THEME_BGCOLOR)))
+            else:
+                gripor.update(Text.from_ansi(ansi_to_truecolor(GRIPOR_CLOSED_ANS, THEME_BGCOLOR)))
+
+            self.gripor_anim_timer.stop()
+            self.gripor_anim_timer = None
+            gripor.styles.offset = (self.gripor_anim_x, 0)
+            gripor.refresh(layout=True)
 
     def go_offline(self) -> None:
         # disable controls
@@ -717,21 +794,26 @@ class TextualRobotnik(App):
             self.set_card_busy(slot, busy=True)
             dismo_btn = self.query_one(f"#dismount")
 
-            self.send_command(cmd_get(['get', n]))
-            await asyncio.sleep(0.2)
-            self.send_command(move_to_slot(['slot', 0]))
-            await asyncio.sleep(0.2)
+            self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
+            await self.send_command_future(cmd_get(['get', n]), 'get')
+            self.log_general.write(f"ANIMATE GRIPOR TO {n}", LOG_INFO)
+            self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
+            self.log_general.write(f"ANIMATE GRIPOR TO {0}", LOG_INFO)
+            await self.send_command_future(move_to_slot(['slot', 0]), 'slot')
+
             self.card_sensor_future = asyncio.get_running_loop().create_future()
             self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
             await self.card_sensor_future
             if self.card_sensor_future.result():
                 self.set_card_present(slot, present=True)
                 await self.send_command_future(cmd_put(['put', 0]), 'put')
+                self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
                 dismo_btn.disabled = False
                 MOUNTED = n
             else:
                 self.send_command("GRIPOR_OPEN")
                 self.set_card_present(slot, present=False)
+                self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
             self.set_card_busy(slot, busy=False)
         finally:
             self.update_status("READY")
@@ -751,7 +833,11 @@ class TextualRobotnik(App):
         self.update_status(f"DISMOUNTING CARD {MOUNTED}")
         try:
             self.set_card_busy(MOUNTED, busy=True)
+            self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
+            await self.send_command_future(move_to_slot(['slot', 0]), 'slot')
+            self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
             await self.send_command_future(cmd_get(['get', 0]), which='get')
+            self.animate_gripor(slot=MOUNTED, state=GRIPOR_STATE_OPEN)
             await self.send_command_future(cmd_put(['put', MOUNTED]), which='put')
             self.set_card_busy(MOUNTED, busy=False)
             MOUNTED = 0
@@ -796,19 +882,18 @@ class TextualRobotnik(App):
         except OSError:
             self.notify("Drive was not ready", severity="error")
 
-def ansi_to_truecolor(ansi_str: str, bg = (0,0,0), sd = (40,40,100)) -> str:
+def ansi_to_truecolor(ansi_str: str, bg = (0,0,0), sd = (40,40,40), contacts=(170,85,0)) -> str:
     """Converts 4-bit standard ANSI backgrounds and foregrounds to true RGB strings
 
     so Textual's theme engine cannot override or mutate them.
     """
     # Standard mapping for default 16-color terminals
     
-    sd = (0,0,0)
     ansi_map = {
         "30": f"38;2;{sd[0]};{sd[1]};{sd[2]}",      # sdcard colour
         "37": "38;2;170;170;170",  # FG White
         "40": f"48;2;{bg[0]};{bg[1]};{bg[2]}",        # BG Black -> Absolute RGB #000000
-        "43": "48;2;170;85;0",     # contacts
+        "43": f"48;2;{contacts[0]};{contacts[1]};{contacts[2]}",     # contacts
     }
     
     def replace_code(match):
@@ -828,8 +913,12 @@ def load_logo():
     global SDCARD_ANS
     with open("sdcard.ans", "r") as sdcard:
         SDCARD_ANS = sdcard.read() #hardcode_ansi_to_truecolor(sdcard.read())
-        #print(SDCARD_ANS)
-        #exit()
+    global GRIPOR_OPEN_ANS
+    with open("gripor-open.ans", "r") as ans:
+        GRIPOR_OPEN_ANS = ans.read()
+    global GRIPOR_CLOSED_ANS
+    with open("gripor-closed.ans", "r") as ans:
+        GRIPOR_CLOSED_ANS = ans.read()
 	
 
 if __name__ == "__main__":

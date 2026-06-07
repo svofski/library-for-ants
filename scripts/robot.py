@@ -142,6 +142,8 @@ def move_to_slot(args):
         return f"""
 G1 Y{Y_FULL_RETRACT} F{SPEED_FULL}
 G1 X{xpos} F{SPEED_FULL}
+M400
+RESPOND TYPE=echo MSG="macro_complete:slot"
 """
     else:
         return ""
@@ -156,6 +158,7 @@ G1 Y{CARD_Y_INSERT}
 G4 P100
 GRIPOR_CLOSE
 G1 Y5
+M400
 RESPOND TYPE=echo MSG="macro_complete:get"
 '''
 
@@ -228,6 +231,7 @@ G4 P100
 G1 Y{CARD_Y_STORE}
 GRIPOR_CLOSE
 G1 Y5
+M400
 RESPOND TYPE=echo MSG="macro_complete:get"
 '''
 
