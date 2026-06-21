@@ -9,7 +9,7 @@ import re
 from functools import partial
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree, Label
-from textual.containers import Vertical, Horizontal, Middle
+from textual.containers import Vertical, Horizontal, Middle, Center
 from textual.worker import get_current_worker
 from textual import work
 from textual.color import Color
@@ -26,6 +26,7 @@ CARD_IN_GRIPOR = False
 
 MOUNTED = 0
 MOUNTED_UUID = ""
+PRESENT = []
 
 GUI_COMMANDS = ['exit', 'quit', 'feckov', 'check', 'mount', 'dismount']
 
@@ -63,6 +64,9 @@ def parse_config_and_args():
     pipe_path = args.pipe if args.pipe else config.get("klipper", "pipe_path", fallback="/tmp/printer")
 
     read_robot_config(config)
+
+    global PRESENT
+    PRESENT = [False] * (len(robot_get_slots()) + 1)
 
     return pipe_path
 
@@ -219,6 +223,22 @@ class TextualRobotnik(App):
         background: orange;
         color: black;
     }
+    #fart-container {
+        width: 100%;
+        height: 100%;
+        position: relative; /* Allows child widgets to use absolute layout */
+    }
+    #card-number {
+        color: $accent;
+        text-style: bold;
+        offset: 5 3;
+        position: absolute;
+        width: 0;
+        background: rgb(40,40,40); /* same as sdcard body */
+    }
+    #card-number.present {
+        width: 2;
+    }
     """
 
     BINDINGS = [
@@ -271,6 +291,9 @@ class TextualRobotnik(App):
                             yield Static("Reader", shrink=True)
                             yield Button("CHECK ALL", id="svc-check-all", classes="slot online")
                             yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
+                            with Static(id="fart-container"):
+                                yield Static(self.sdcard_ansi, id=f"sdcard0", classes="sdcard-graphics")
+                                yield Static("", id="card-number")
                     yield Static("GRIPOR", id="gripor")
                     with Horizontal(id="second-buttons-row"):
                         yield Label("READY", id="svc-status", classes="status-label")
@@ -604,8 +627,32 @@ class TextualRobotnik(App):
             stat = self.query_one("#mount_label", Static)
             stat.update(f"{robot_get_block_device()} on {robot_get_mount_point()}: NO VOLUME")
 
+    async def check_slot(self, n):
+        self.update_status(f"CHECK SLOT {n}")
+        self.set_card_busy(n, busy=True)
+        self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
+        await self.send_command_future(cmd_get(['get', n]), 'get')
+        self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
+        await self.send_command_future(move_to_slot(['slot', 0]), 'slot')
+        
+        self.card_sensor_future = asyncio.get_running_loop().create_future()
+        self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
+        await self.card_sensor_future
+        if self.card_sensor_future.result():
+            self.log_general.write(f"Card present in slot {n}", LOG_MEDIA)
+            self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
+            await self.send_command_future(cmd_put(['put', n]), 'put')
+            self.set_card_present(n, present=True)
+            self.animate_gripor(slot=n, state=GRIPOR_STATE_OPEN)
+        else:
+            self.send_command("GRIPOR_OPEN")
+            self.set_card_present(n, present=False)
+            self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
+        self.set_card_busy(n, busy=False)
+
     @work(exclusive=True)
-    async def check_slot_sequence(self, slots=0):
+    async def check_slot_sequence(self, slots=0, stop_at_empty=False):
+        global PRESENT
         try:
             lslots = list(slots)
         except:
@@ -623,30 +670,39 @@ class TextualRobotnik(App):
             if self.ABORTED:
                 self.activate_abort_button(activate=False)
                 break
-            self.update_status(f"CHECK SLOT {n}")
-            self.set_card_busy(n, busy=True)
-            self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
-            await self.send_command_future(cmd_get(['get', n]), 'get')
-            self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
-            await self.send_command_future(move_to_slot(['slot', 0]), 'slot')
-            
-            self.card_sensor_future = asyncio.get_running_loop().create_future()
-            self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
-            await self.card_sensor_future
-            if self.card_sensor_future.result():
-                self.log_general.write(f"Card present in slot {n}", LOG_MEDIA)
-                self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
-                await self.send_command_future(cmd_put(['put', n]), 'put')
-                self.set_card_present(n, present=True)
-                self.animate_gripor(slot=n, state=GRIPOR_STATE_OPEN)
-            else:
-                self.send_command("GRIPOR_OPEN")
-                self.set_card_present(n, present=False)
-                self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
-            self.set_card_busy(n, busy=False)
+            await self.check_slot(n)
+            if stop_at_empty and PRESENT[n] == False:
+                break
 
         self.update_status("READY")
         self.disable_all_buttons(disable=False)
+
+    async def check_slot_sequence_fuu(self, slots=0, stop_at_empty=False):
+        global PRESENT
+        try:
+            lslots = list(slots)
+        except:
+            if slots == -1:
+                lslots = range(1, 1 + len(robot_get_slots()))
+            else:
+                lslots = [slots]
+
+        self.ABORTED = False
+        self.disable_all_buttons(disable=True)
+        self.activate_abort_button(activate=True)
+
+        lslots = [int(x) for x in lslots]
+        for n in lslots:
+            if self.ABORTED:
+                self.activate_abort_button(activate=False)
+                break
+            await self.check_slot(n)
+            if stop_at_empty and PRESENT[n] == False:
+                break
+
+        self.update_status("READY")
+        self.disable_all_buttons(disable=False)
+
 
     @work(exclusive=True)
     async def adjust_slot_sequence(self, slots=0):
@@ -692,8 +748,43 @@ class TextualRobotnik(App):
                 check_btn.remove_class("blunk")
                 check_btn.remove_class("busy")
 
+    # temporary mode switch for Mount buttons
+    def update_all_mount_buttons(self, mode: str) -> None:
+        """
+        mode = "mount", normal mount button
+        mode = "put", put card in beak in slot
+        mode = "disable", all off because unknown card in reader
+        """
+        global MOUNTED, PRESENT
+
+        if mode == "mount":
+            # default mode
+            for n in range(1, 1 + len(robot_get_slots())):
+                btn.label = "Mount"
+                btn.disabled = False
+        elif mode == "put":
+            # put it back mode but we don't know where
+            for n in range(1, 1 + len(robot_get_slots())):
+                btn.label = "Put"
+                btn.disabled = PRESENT[n]
+
     def set_card_present(self, slot, present=True):
-        if slot > 0:
+        global MOUNTED, PRESENT
+        PRESENT[slot] = present 
+        if slot == 0:
+            gfx = self.query_one(f"#sdcard{slot}")
+            card_num = self.query_one("#card-number")
+            if present:
+                gfx.add_class("present")
+                gfx.update(self.sdcard_ansi)
+                card_num.update(str(MOUNTED).rjust(2))
+                card_num.add_class("present")
+            else:
+                gfx.update(self.sdcard_ansi_disabled)
+                gfx.remove_class("present")
+                card_num.update("")
+                card_num.remove_class("present")
+        elif slot > 0:
             check_btn = self.query_one(f"#check{slot}")
             gfx = self.query_one(f"#sdcard{slot}")
             if present:
@@ -809,7 +900,10 @@ class TextualRobotnik(App):
                 await self.send_command_future(cmd_put(['put', 0]), 'put')
                 self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
                 dismo_btn.disabled = False
+                dismo_btn.label = f"Dismount"
                 MOUNTED = n
+
+                self.set_card_present(0, present=True)
             else:
                 self.send_command("GRIPOR_OPEN")
                 self.set_card_present(slot, present=False)
@@ -821,13 +915,32 @@ class TextualRobotnik(App):
 
     @work(exclusive=True)
     async def dismount_slot_sequence(self):
-        global MOUNTED
+        global MOUNTED, PRESENT
         if MOUNTED == 0:
-            self.log_general.write(f"Not mounted.", LOG_MEDIA)
-            return
+            await self.check_slot(0)
+
+            if not PRESENT[0]:
+                self.log_general.write(f"No card in reader")
+                return
+
+            self.log_general.write(f"Find empty slot for rogue card", LOG_MEDIA)
+
+            #check_slots_instance = self.check_slot_sequence(-1, stop_at_empty=True)
+            #await check_slots_instance.wait()
+
+            await self.check_slot_sequence_fuu(-1, stop_at_empty=True)
+            for n in range(1, 1 + len(robot_get_slots())):
+                if not PRESENT[n]:
+                    self.log_general.write(f"Slot {n} was free, new home for rogue card")
+                    MOUNTED = n
+                    break
+
+            if MOUNTED == 0:
+                self.log_general.write(f"No room for card in reader")
 
         dismo_btn = self.query_one(f"#dismount")
-        dismo_btn.disabled = True
+        dismo_btn.text = "Dismount"
+        #dismo_btn.disabled = True
 
         self.disable_all_buttons(disable=True)
         self.update_status(f"DISMOUNTING CARD {MOUNTED}")
@@ -840,8 +953,10 @@ class TextualRobotnik(App):
             self.animate_gripor(slot=MOUNTED, state=GRIPOR_STATE_OPEN)
             await self.send_command_future(cmd_put(['put', MOUNTED]), which='put')
             self.set_card_busy(MOUNTED, busy=False)
+            self.set_card_present(MOUNTED)
             MOUNTED = 0
             self.disable_all_buttons(disable=False)
+            self.set_card_present(0, present=False)
         finally:
             self.update_status("READY")
 
