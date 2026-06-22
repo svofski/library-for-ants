@@ -172,7 +172,7 @@ GRIPOR_OPEN
 G1 Y14      ; retract to close the beak
 M400
 GRIPOR_CLOSE
-G1 Y22 F1000     ; push in
+G1 Y{CARD_Y_INSERT-2} F1000     ; push in
 G4 P250
 G1 Y{Y_FULL_RETRACT} F{SPEED_FULL}
 GRIPOR_OPEN

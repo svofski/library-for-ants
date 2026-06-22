@@ -24,7 +24,7 @@ from robot import *
 HOMED = False
 CARD_IN_GRIPOR = False
 
-MOUNTED = 0
+MOUNTED = -1 # -1 when we don't know if the card is in reader
 MOUNTED_UUID = ""
 PRESENT = []
 
@@ -322,20 +322,6 @@ class TextualRobotnik(App):
         # write to klipper
         try:
             self.pipe_writer = open(self.pipe_path, "w", encoding="utf-8", buffering=1)
-            # immediately query homed status
-            #if self.pipe_writer:
-            #    try:
-            #        self.pipe_writer.write(f"STATUS\nCHECK_HOMED\n")
-            #        self.pipe_writer.flush()
-            #    except OSError as e:
-            #        self.log_general.write(f"Write failure down active pipe matrix:[/bold red] {e}", LOG_ERROR)
-            #        self.close_pipes()
-            #        return
-            #else:
-            #    self.log_general.write("Connection writing pipe context unavailable.[/bold red]", LOG_ERROR)
-            #    self.close_pipes()
-            #    return
-
         except OSError as e:
             self.close_pipes()
             self.log_general.write(f"[bold red][-] Failed to open write pipe:[/bold red] {e}", LOG_ERROR)
@@ -374,7 +360,7 @@ class TextualRobotnik(App):
                 if r[x] != 0:
                     canvas.set_pixel(x, y, color)
 
-    def on_ready(self) -> None:
+    async def on_ready(self) -> None:
         global THEME_BGCOLOR
         self.draw_logo()
         bgcolor = self.query_one("#canvas-wrapper").background_colors[0].rgb
@@ -385,17 +371,15 @@ class TextualRobotnik(App):
             sd.update(self.sdcard_ansi_disabled)
 
         self.on_resize()
+        self.gripor_update_graphics(state=GRIPOR_STATE_OPEN)
         self.animate_gripor(0, state=GRIPOR_STATE_OPEN)
 
-        #self.set_card_present(12)
-
+        await self.check_homed()
+        self.send_command(move_to_slot(['slot', 0]))
+        ###self.disable_all_buttons(disable=False)
 
     def on_resize(self) -> None:
         pass
-        #buttons_row = self.query_one("#main-buttons-row")
-        #self.log_general.write(f"buttons_row.width={buttons_row.content_size.width}")
-        #gripor = self.query_one("#gripor")
-        #gripor.styles.offset = (40, 0) #buttons_row.content_size.width - 8
 
     def on_mount(self) -> None:
         #self.draw_logo()
@@ -427,16 +411,31 @@ class TextualRobotnik(App):
 
         self.disable_all_buttons(True)
 
+    # checks status before any command, returns awaitable future
+    def check_homed(self):
+        self.homed_future = asyncio.get_running_loop().create_future()
         self.send_command("CHECK_HOMED")
-        
+        return self.homed_future
+
+    # sets future result if already homed, or starts G28
+    def set_homed_result(self, homed: bool) -> None:
+        if homed and self.homed_future and not self.homed_future.done():
+            self.homed_future.set_result(homed)
+        else:
+            self.update_status("HOMING")
+            self.disable_all_buttons(disable=True)
+            self.send_command("G28")
+
     @work(exclusive=True)
     async def rehome(self) -> None:
         HOMED = False
         self.update_status("HOMING")
         self.disable_all_buttons(disable=True)
-        await self.send_command_future("G28", "homing")
-        self.update_status("READY")
-        self.disable_all_buttons(disable=False)
+        try:
+            await self.send_command_future("G28", "homing")
+        finally:
+            self.update_status("READY")
+            self.disable_all_buttons(disable=False)
 
     def handle_pipe_read(self) -> None:
         global HOMED, CARD_IN_GRIPOR
@@ -455,18 +454,21 @@ class TextualRobotnik(App):
                         if line.find("AXIS_STATUS: READY") != -1:
                             HOMED = True
                             self.update_status("READY")
+                            self.set_homed_result(True)
                             self.disable_all_buttons(disable=False)
                         if line.find("AXIS_STATUS: UNHOMED") != -1:
-                            self.rehome()
+                            HOMED = False
+                            self.set_homed_result(False)
+                            #self.rehome()
                         if line.find("Must home axes first") != -1:
-                            self.rehome()
-                        #if line.find("Klipper state: Ready") != -1:
-                        #    self.send_command("CHECK_HOMED")
-                        #    self.disable_all_buttons(disable=False)
+                            HOMED = False
+                            self.set_homed_result(False)
+                            #self.rehome()
                         if line.find("Lost communication with MCU") != -1 or line.find("Klipper state: Shutdown") != -1:
                             self.go_offline()
                             HOMED = False
                             CARD_IN_GRIPOR = False
+                            MOUNTED = -1
                         if self.card_sensor_future and not self.card_sensor_future.done():
                             if line.find("filament not detected") != -1:
                                 CARD_IN_GRIPOR = False
@@ -628,6 +630,8 @@ class TextualRobotnik(App):
             stat.update(f"{robot_get_block_device()} on {robot_get_mount_point()}: NO VOLUME")
 
     async def check_slot(self, n):
+        await self.check_homed()
+
         self.update_status(f"CHECK SLOT {n}")
         self.set_card_busy(n, busy=True)
         self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
@@ -662,20 +666,19 @@ class TextualRobotnik(App):
                 lslots = [slots]
 
         self.ABORTED = False
-        self.disable_all_buttons(disable=True)
-        self.activate_abort_button(activate=True)
+        self.disable_all_buttons(disable=True, abortable=True)
 
-        lslots = [int(x) for x in lslots]
-        for n in lslots:
-            if self.ABORTED:
-                self.activate_abort_button(activate=False)
-                break
-            await self.check_slot(n)
-            if stop_at_empty and PRESENT[n] == False:
-                break
-
-        self.update_status("READY")
-        self.disable_all_buttons(disable=False)
+        try:
+            lslots = [int(x) for x in lslots]
+            for n in lslots:
+                if self.ABORTED:
+                    break
+                await self.check_slot(n)
+                if stop_at_empty and PRESENT[n] == False:
+                    break
+        finally:
+            self.update_status("READY")
+            self.disable_all_buttons(disable=False)
 
     async def check_slot_sequence_fuu(self, slots=0, stop_at_empty=False):
         global PRESENT
@@ -688,20 +691,18 @@ class TextualRobotnik(App):
                 lslots = [slots]
 
         self.ABORTED = False
-        self.disable_all_buttons(disable=True)
-        self.activate_abort_button(activate=True)
-
-        lslots = [int(x) for x in lslots]
-        for n in lslots:
-            if self.ABORTED:
-                self.activate_abort_button(activate=False)
-                break
-            await self.check_slot(n)
-            if stop_at_empty and PRESENT[n] == False:
-                break
-
-        self.update_status("READY")
-        self.disable_all_buttons(disable=False)
+        self.disable_all_buttons(disable=True, abortable=True)
+        try:
+            lslots = [int(x) for x in lslots]
+            for n in lslots:
+                if self.ABORTED:
+                    break
+                await self.check_slot(n)
+                if stop_at_empty and PRESENT[n] == False:
+                    break
+        finally:
+            self.update_status("READY")
+            self.disable_all_buttons(disable=False)
 
 
     @work(exclusive=True)
@@ -714,25 +715,29 @@ class TextualRobotnik(App):
             else:
                 lslots = [slots]
 
+        await self.check_homed()
+
         self.ABORTED = False
-        self.activate_abort_button(activate=False)
-        self.disable_mount_buttons(disable=True)
-
-        self.send_command("GRIPOR_CLOSE\nM400")
-        lslots = [int(x) for x in lslots]
-        for n in lslots:
-            if self.ABORTED:
-                self.activate_abort_button(activate=False)
-                break
-            self.update_status(f"ADJUSTING SLOT {n}")
-            self.set_card_busy(n, busy=True)
-            await self.send_command_future(adjust_card_in_slot(['adjust', n]), 'adjust')
-            self.set_card_busy(n, busy=False)
-        self.send_command(move_to_slot(['slot', n]))
-        self.send_command("GRIPOR_OPEN")
-
-        self.update_status("READY")
-        self.disable_mount_buttons(disable=False)
+        self.disable_all_buttons(disable=True, abortable=True)
+        n = 1
+        try:
+            self.send_command("GRIPOR_CLOSE\nM400")
+            self.gripor_update_graphics(state=GRIPOR_STATE_CLOSED)
+            lslots = [int(x) for x in lslots]
+            for n in lslots:
+                if self.ABORTED:
+                    break
+                self.update_status(f"ADJUSTING SLOT {n}")
+                self.set_card_busy(n, busy=True)
+                self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
+                await self.send_command_future(adjust_card_in_slot(['adjust', n]), 'adjust')
+                self.set_card_busy(n, busy=False)
+            self.send_command(move_to_slot(['slot', n]))
+        finally:
+            self.send_command("GRIPOR_OPEN")
+            self.animate_gripor(slot=n, state=GRIPOR_STATE_OPEN)
+            self.update_status("READY")
+            self.disable_all_buttons(disable=False)
 
 
     def set_card_busy(self, slot, busy=True):
@@ -796,18 +801,11 @@ class TextualRobotnik(App):
                 gfx.remove_class("present")
                 gfx.update(self.sdcard_ansi_disabled)
 
-    def disable_mount_buttons(self, disable: bool) -> None:
-        for patonki in self.query('.mount-button'):
-            patonki.disabled = disable
-
-    def disable_all_buttons(self, disable: bool) -> None:
+    def disable_all_buttons(self, disable: bool, abortable: bool = False) -> None:
         for patonki in self.query("Button"):
             patonki.disabled = disable
-        self.activate_abort_button(activate=False)
-
-    def activate_abort_button(self, activate: bool) -> None:
         abort = self.query_one("#svc-abort")
-        abort.disabled = not activate
+        abort.disabled = not abortable
 
     def update_status(self, msg: str) -> None:
         self.log_general.write(msg, LOG_STATUS)
@@ -829,6 +827,14 @@ class TextualRobotnik(App):
         if self.gripor_anim_timer == None:
             self.gripor_anim_timer = self.set_interval(0.2, self.gripor_anim_frame)
 
+    def gripor_update_graphics(self, state=GRIPOR_STATE_OPEN, gripor=None):
+        if gripor == None:
+            gripor = self.query_one("#gripor")
+        if state == GRIPOR_STATE_OPEN:
+            gripor.update(Text.from_ansi(ansi_to_truecolor(GRIPOR_OPEN_ANS, THEME_BGCOLOR)))
+        else:
+            gripor.update(Text.from_ansi(ansi_to_truecolor(GRIPOR_CLOSED_ANS, THEME_BGCOLOR)))
+
     def gripor_anim_frame(self) -> None:
         if self.gripor_anim_x != self.gripor_anim_x_end:
             dx = self.gripor_anim_x_end - self.gripor_anim_x
@@ -842,11 +848,7 @@ class TextualRobotnik(App):
             gripor.refresh(layout=True)
         else:
             gripor = self.query_one("#gripor")
-            if self.gripor_anim_state_end == GRIPOR_STATE_OPEN:
-                gripor.update(Text.from_ansi(ansi_to_truecolor(GRIPOR_OPEN_ANS, THEME_BGCOLOR)))
-            else:
-                gripor.update(Text.from_ansi(ansi_to_truecolor(GRIPOR_CLOSED_ANS, THEME_BGCOLOR)))
-
+            self.gripor_update_graphics(self.gripor_anim_state_end, gripor=gripor)
             self.gripor_anim_timer.stop()
             self.gripor_anim_timer = None
             gripor.styles.offset = (self.gripor_anim_x, 0)
@@ -869,8 +871,12 @@ class TextualRobotnik(App):
     @work(exclusive=True)
     async def mount_slot_sequence(self, slot=0):
         global MOUNTED
+
+        await self.check_homed()
+
         slot = int(slot)
         if MOUNTED != 0 and MOUNTED != slot:
+            # this will also try and locate a free slot if a card is suddenly in reader
             dismo_instance = self.dismount_slot_sequence()
             await dismo_instance.wait()
 
@@ -887,6 +893,7 @@ class TextualRobotnik(App):
 
             self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
             await self.send_command_future(cmd_get(['get', n]), 'get')
+            self.set_card_present(n, present=False)
             self.log_general.write(f"ANIMATE GRIPOR TO {n}", LOG_INFO)
             self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
             self.log_general.write(f"ANIMATE GRIPOR TO {0}", LOG_INFO)
@@ -896,7 +903,6 @@ class TextualRobotnik(App):
             self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
             await self.card_sensor_future
             if self.card_sensor_future.result():
-                self.set_card_present(slot, present=True)
                 await self.send_command_future(cmd_put(['put', 0]), 'put')
                 self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
                 dismo_btn.disabled = False
@@ -906,7 +912,6 @@ class TextualRobotnik(App):
                 self.set_card_present(0, present=True)
             else:
                 self.send_command("GRIPOR_OPEN")
-                self.set_card_present(slot, present=False)
                 self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
             self.set_card_busy(slot, busy=False)
         finally:
@@ -916,7 +921,10 @@ class TextualRobotnik(App):
     @work(exclusive=True)
     async def dismount_slot_sequence(self):
         global MOUNTED, PRESENT
-        if MOUNTED == 0:
+
+        await self.check_homed()
+
+        if MOUNTED <= 0:
             await self.check_slot(0)
 
             if not PRESENT[0]:
@@ -924,9 +932,6 @@ class TextualRobotnik(App):
                 return
 
             self.log_general.write(f"Find empty slot for rogue card", LOG_MEDIA)
-
-            #check_slots_instance = self.check_slot_sequence(-1, stop_at_empty=True)
-            #await check_slots_instance.wait()
 
             await self.check_slot_sequence_fuu(-1, stop_at_empty=True)
             for n in range(1, 1 + len(robot_get_slots())):
@@ -940,24 +945,41 @@ class TextualRobotnik(App):
 
         dismo_btn = self.query_one(f"#dismount")
         dismo_btn.text = "Dismount"
-        #dismo_btn.disabled = True
 
         self.disable_all_buttons(disable=True)
         self.update_status(f"DISMOUNTING CARD {MOUNTED}")
+        mounted_old = MOUNTED
         try:
             self.set_card_busy(MOUNTED, busy=True)
             self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
             await self.send_command_future(move_to_slot(['slot', 0]), 'slot')
             self.animate_gripor(slot=0, state=GRIPOR_STATE_CLOSED)
-            await self.send_command_future(cmd_get(['get', 0]), which='get')
+
+            success = False
+            for nretry in range(3):
+                await self.send_command_future(cmd_get(['get', 0]), which='get')
+                self.set_card_present(0, present=False)
+
+                self.card_sensor_future = asyncio.get_running_loop().create_future()
+                self.send_command("M400\nQUERY_FILAMENT_SENSOR SENSOR=card_sensor")
+                await self.card_sensor_future
+                if self.card_sensor_future.result():
+                    success = True
+                    break
+
+            if not success:
+                self.log_general.write(f"Failed to get card from reader", LOG_ERROR)
+                self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
+                return
+
             self.animate_gripor(slot=MOUNTED, state=GRIPOR_STATE_OPEN)
             await self.send_command_future(cmd_put(['put', MOUNTED]), which='put')
-            self.set_card_busy(MOUNTED, busy=False)
             self.set_card_present(MOUNTED)
             MOUNTED = 0
-            self.disable_all_buttons(disable=False)
-            self.set_card_present(0, present=False)
         finally:
+            self.send_command("GRIPOR_OPEN")
+            self.disable_all_buttons(disable=False)
+            self.set_card_busy(mounted_old, busy=False)
             self.update_status("READY")
 
     def busy_animation_cb(self, btn):
