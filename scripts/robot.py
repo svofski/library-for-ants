@@ -151,7 +151,7 @@ RESPOND TYPE=echo MSG="macro_complete:slot"
 
 def get_from_reader():
     return f'''
-G1 {Y_FULL_RETRACT} F{SPEED_FULL}
+G1 Y{Y_FULL_RETRACT} F{SPEED_FULL}
 GRIPOR_OPEN
 G1 X{CARD_X} F{SPEED_FULL}
 G1 Y{CARD_Y_INSERT}

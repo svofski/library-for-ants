@@ -6,6 +6,7 @@ import configparser
 import asyncio
 import pyudev
 import re
+import shelve
 from functools import partial
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree, Label
@@ -22,11 +23,9 @@ from rich.text import Text
 from robot import *
 
 HOMED = False
-CARD_IN_GRIPOR = False
 
 MOUNTED = -1 # -1 when we don't know if the card is in reader
 MOUNTED_UUID = ""
-PRESENT = []
 
 GUI_COMMANDS = ['exit', 'quit', 'feckov', 'check', 'mount', 'dismount']
 
@@ -51,6 +50,28 @@ THEME_BGCOLOR = (0,0,0)
 GRIPOR_STATE_OPEN = 0
 GRIPOR_STATE_CLOSED = 1
 
+class State:
+    PRESENT = []
+    Filename = "robotnik.db"
+
+    def __init__(self, nslots):
+        self.PRESENT = [False] * nslots
+        if not os.path.exists(self.Filename):
+            return
+
+        with shelve.open(self.Filename) as shelf:
+            self.PRESENT = shelf.get("present", self.PRESENT)
+
+    def set_present(self, slot, state):
+        self.PRESENT[slot] = state
+        with shelve.open(self.Filename) as shelf:
+            shelf["present"] = self.PRESENT
+
+    def is_present(self, slot) -> bool:
+        return self.PRESENT[slot]
+
+PSTATE: State = None
+            
 def parse_config_and_args():
     parser = argparse.ArgumentParser(description="Klipper Textual Pipe Controller")
     parser.add_argument("-c", "--config", default="config.ini", help="Path to INI file")
@@ -65,8 +86,8 @@ def parse_config_and_args():
 
     read_robot_config(config)
 
-    global PRESENT
-    PRESENT = [False] * (len(robot_get_slots()) + 1)
+    global PSTATE
+    PSTATE = State(len(robot_get_slots()) + 1)
 
     return pipe_path
 
@@ -263,6 +284,9 @@ class TextualRobotnik(App):
         self.gripor_anim_timer = None
         self.gripor_anim_state_end = GRIPOR_STATE_OPEN
 
+        self.command_future = None
+        self.homed_future = None
+
     def log_write(self, msg: str) -> None:
         self.log_general.write(msg)
 
@@ -361,14 +385,15 @@ class TextualRobotnik(App):
                     canvas.set_pixel(x, y, color)
 
     async def on_ready(self) -> None:
-        global THEME_BGCOLOR
+        global THEME_BGCOLOR, PSTATE
         self.draw_logo()
         bgcolor = self.query_one("#canvas-wrapper").background_colors[0].rgb
         THEME_BGCOLOR = bgcolor
         self.sdcard_ansi = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, bg=bgcolor, sd=(40,40,40), contacts=(170,85,0)))
         self.sdcard_ansi_disabled = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, bg=bgcolor, sd=(0,0,0), contacts=(30,30,30)))
-        for sd in self.query('.sdcard-graphics'):
-            sd.update(self.sdcard_ansi_disabled)
+
+        for n in range(len(PSTATE.PRESENT)):
+            self.set_card_graphics(slot=n, present=PSTATE.is_present(n))
 
         self.on_resize()
         self.gripor_update_graphics(state=GRIPOR_STATE_OPEN)
@@ -438,7 +463,7 @@ class TextualRobotnik(App):
             self.disable_all_buttons(disable=False)
 
     def handle_pipe_read(self) -> None:
-        global HOMED, CARD_IN_GRIPOR
+        global HOMED
 
         try:
             ready_data = os.read(self.pipe_fd, 4096)
@@ -467,15 +492,12 @@ class TextualRobotnik(App):
                         if line.find("Lost communication with MCU") != -1 or line.find("Klipper state: Shutdown") != -1:
                             self.go_offline()
                             HOMED = False
-                            CARD_IN_GRIPOR = False
                             MOUNTED = -1
                         if self.card_sensor_future and not self.card_sensor_future.done():
                             if line.find("filament not detected") != -1:
-                                CARD_IN_GRIPOR = False
                                 self.card_sensor_future.set_result(False)
                                 self.log_general.write("No card in gripor", LOG_SENSOR)
                             if line.find("filament detected") != -1:
-                                CARD_IN_GRIPOR = True
                                 self.card_sensor_future.set_result(True)
                                 self.log_general.write("Card in gripor", LOG_SENSOR)
                         if self.command_future and not self.command_future.done():
@@ -630,8 +652,6 @@ class TextualRobotnik(App):
             stat.update(f"{robot_get_block_device()} on {robot_get_mount_point()}: NO VOLUME")
 
     async def check_slot(self, n):
-        await self.check_homed()
-
         self.update_status(f"CHECK SLOT {n}")
         self.set_card_busy(n, busy=True)
         self.animate_gripor(slot=n, state=GRIPOR_STATE_CLOSED)
@@ -656,7 +676,7 @@ class TextualRobotnik(App):
 
     @work(exclusive=True)
     async def check_slot_sequence(self, slots=0, stop_at_empty=False):
-        global PRESENT
+        global PSTATE
         try:
             lslots = list(slots)
         except:
@@ -674,14 +694,14 @@ class TextualRobotnik(App):
                 if self.ABORTED:
                     break
                 await self.check_slot(n)
-                if stop_at_empty and PRESENT[n] == False:
+                if stop_at_empty and PSTATE.is_present(n) == False:
                     break
         finally:
             self.update_status("READY")
             self.disable_all_buttons(disable=False)
 
     async def check_slot_sequence_fuu(self, slots=0, stop_at_empty=False):
-        global PRESENT
+        global PSTATE
         try:
             lslots = list(slots)
         except:
@@ -698,7 +718,7 @@ class TextualRobotnik(App):
                 if self.ABORTED:
                     break
                 await self.check_slot(n)
-                if stop_at_empty and PRESENT[n] == False:
+                if stop_at_empty and PSTATE.is_present(n) == False:
                     break
         finally:
             self.update_status("READY")
@@ -714,8 +734,6 @@ class TextualRobotnik(App):
                 lslots = range(1, 1 + len(robot_get_slots()))
             else:
                 lslots = [slots]
-
-        await self.check_homed()
 
         self.ABORTED = False
         self.disable_all_buttons(disable=True, abortable=True)
@@ -760,7 +778,7 @@ class TextualRobotnik(App):
         mode = "put", put card in beak in slot
         mode = "disable", all off because unknown card in reader
         """
-        global MOUNTED, PRESENT
+        global MOUNTED, PSTATE
 
         if mode == "mount":
             # default mode
@@ -771,11 +789,11 @@ class TextualRobotnik(App):
             # put it back mode but we don't know where
             for n in range(1, 1 + len(robot_get_slots())):
                 btn.label = "Put"
-                btn.disabled = PRESENT[n]
+                btn.disabled = PSTATE.is_present(n)
 
     def set_card_present(self, slot, present=True):
-        global MOUNTED, PRESENT
-        PRESENT[slot] = present 
+        global MOUNTED, PSTATE
+        PSTATE.set_present(slot, present)
         if slot == 0:
             gfx = self.query_one(f"#sdcard{slot}")
             card_num = self.query_one("#card-number")
@@ -800,6 +818,15 @@ class TextualRobotnik(App):
                 check_btn.remove_class("present")
                 gfx.remove_class("present")
                 gfx.update(self.sdcard_ansi_disabled)
+
+    def set_card_graphics(self, slot, present):
+        gfx = self.query_one(f"#sdcard{slot}")
+        if present:
+            gfx.add_class("present")
+            gfx.update(self.sdcard_ansi)
+        else:
+            gfx.remove_class("present")
+            gfx.update(self.sdcard_ansi_disabled)
 
     def disable_all_buttons(self, disable: bool, abortable: bool = False) -> None:
         for patonki in self.query("Button"):
@@ -872,8 +899,6 @@ class TextualRobotnik(App):
     async def mount_slot_sequence(self, slot=0):
         global MOUNTED
 
-        await self.check_homed()
-
         slot = int(slot)
         if MOUNTED != 0 and MOUNTED != slot:
             # this will also try and locate a free slot if a card is suddenly in reader
@@ -920,14 +945,12 @@ class TextualRobotnik(App):
 
     @work(exclusive=True)
     async def dismount_slot_sequence(self):
-        global MOUNTED, PRESENT
-
-        await self.check_homed()
+        global MOUNTED, PSTATE
 
         if MOUNTED <= 0:
             await self.check_slot(0)
 
-            if not PRESENT[0]:
+            if not PSTATE.is_present(0):
                 self.log_general.write(f"No card in reader")
                 return
 
@@ -935,7 +958,7 @@ class TextualRobotnik(App):
 
             await self.check_slot_sequence_fuu(-1, stop_at_empty=True)
             for n in range(1, 1 + len(robot_get_slots())):
-                if not PRESENT[n]:
+                if not PSTATE.is_present(n):
                     self.log_general.write(f"Slot {n} was free, new home for rogue card")
                     MOUNTED = n
                     break
@@ -992,12 +1015,15 @@ class TextualRobotnik(App):
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         #self.log_general.write(f"on_button_pressed id={event.button.id}")
         if event.button.id.startswith("check"):
+            await self.check_homed()
             slot = event.button.id[len("check"):]
             self.check_slot_sequence(slots=[slot])
         if event.button.id.startswith("mount"):
+            await self.check_homed()
             slot = int(event.button.id[len("mount"):])
             self.mount_slot_sequence(slot)
         if event.button.id.startswith("dismount"):
+            await self.check_homed()
             self.dismount_slot_sequence()
         if event.button.id == "btn-rescan":
             self.read_media_dir()
