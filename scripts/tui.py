@@ -22,7 +22,11 @@ from rich.text import Text
 
 from robot import *
 
-HOMED = False
+HS_UNHOMED = 0
+HS_HOMING = 1
+HS_HOMED = 2
+
+HOMING_STATE = HS_UNHOMED
 
 MOUNTED = -1 # -1 when we don't know if the card is in reader
 MOUNTED_UUID = ""
@@ -444,16 +448,23 @@ class TextualRobotnik(App):
 
     # sets future result if already homed, or starts G28
     def set_homed_result(self, homed: bool) -> None:
-        if homed and self.homed_future and not self.homed_future.done():
-            self.homed_future.set_result(homed)
+        global HOMING_STATE
+        if homed:
+            HOMING_STATE = HS_HOMED
+            if self.homed_future and not self.homed_future.done():
+                self.homed_future.set_result(homed)
         else:
-            self.update_status("HOMING")
-            self.disable_all_buttons(disable=True)
-            self.send_command("G28")
+            # reported not homed, and not yet homing -> go homing
+            if HOMING_STATE != HS_HOMING:
+                HOMING_STATE = HS_HOMING
+                self.update_status("HOMING")
+                self.disable_all_buttons(disable=True)
+                self.send_command("G28")
 
     @work(exclusive=True)
     async def rehome(self) -> None:
-        HOMED = False
+        global HOMING_STATE
+        HOMING_STATE = HS_HOMING
         self.update_status("HOMING")
         self.disable_all_buttons(disable=True)
         try:
@@ -461,9 +472,10 @@ class TextualRobotnik(App):
         finally:
             self.update_status("READY")
             self.disable_all_buttons(disable=False)
+            HOMING_STATE = HS_HOMED
 
     def handle_pipe_read(self) -> None:
-        global HOMED
+        global HOMING_STATE
 
         try:
             ready_data = os.read(self.pipe_fd, 4096)
@@ -477,21 +489,15 @@ class TextualRobotnik(App):
                         if line != "ok":
                             self.log_klipper.write(line, LOG_KLIPPER)
                         if line.find("AXIS_STATUS: READY") != -1:
-                            HOMED = True
                             self.update_status("READY")
                             self.set_homed_result(True)
                             self.disable_all_buttons(disable=False)
                         if line.find("AXIS_STATUS: UNHOMED") != -1:
-                            HOMED = False
                             self.set_homed_result(False)
-                            #self.rehome()
                         if line.find("Must home axes first") != -1:
-                            HOMED = False
                             self.set_homed_result(False)
-                            #self.rehome()
                         if line.find("Lost communication with MCU") != -1 or line.find("Klipper state: Shutdown") != -1:
                             self.go_offline()
-                            HOMED = False
                             MOUNTED = -1
                         if self.card_sensor_future and not self.card_sensor_future.done():
                             if line.find("filament not detected") != -1:
