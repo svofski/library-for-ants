@@ -6,14 +6,17 @@ import configparser
 import asyncio
 import pyudev
 import re
+import dbm.dumb
 import shelve
+from pathlib import Path
 from functools import partial
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Input, RichLog, Button, Static, DirectoryTree, Label
+from textual.widgets import Header, Footer, Input, RichLog, Button, Static, Label, DirectoryTree
 from textual.containers import Vertical, Horizontal, Middle, Center
 from textual.worker import get_current_worker
 from textual import work
 from textual.color import Color
+from textual.worker import WorkerCancelled
 from textual_canvas import Canvas
 import psutil
 import png
@@ -331,7 +334,8 @@ class TextualRobotnik(App):
             with Horizontal(id="dir-header"):
                 yield Static(f"{robot_get_block_device()} on {robot_get_mount_point()}: {MOUNTED_UUID}", id="mount_label")
                 yield Button("Rescan", id="btn-rescan", compact=True)
-            yield DirectoryTree(robot_get_mount_point())
+            with Vertical(id="tree-container"):
+                yield DirectoryTree(robot_get_mount_point())
             with Horizontal(id="layout-row-1"):
                 yield RichLog(id="general_log", highlight=True, markup=True, max_lines=200)
                 yield RichLog(id="klipper_log", highlight=True, markup=True, max_lines=200)
@@ -597,14 +601,16 @@ class TextualRobotnik(App):
 
         if device and BLOCK_DEVICE in device.device_node:
             action = device.action # 'add', 'remove', or 'change'
-
+            #self.log_general.write(f"handle_udev_read: {device.action}", LOG_MEDIA)
             if action == "add":
                 self.log_general.write(f"CARD ADD Node: {device.device_node}", LOG_MEDIA)
                 self.set_timer(2.0, lambda: self.call_next(self.read_media_dir))
             elif action == "remove":
                 self.log_general.write(f"CARD REMOVE Node: {device.device_node}", LOG_MEDIA)
+                self.set_timer(2.0, lambda: self.call_next(self.read_media_dir))
             elif action == "change":
                 self.log_general.write(f"CARD REMOVE Node: {device.device_node}", LOG_MEDIA)
+                self.set_timer(2.0, lambda: self.call_next(self.read_media_dir))
 
     @work(thread=True, exclusive=True)
     def track_volumes(self) -> None:
@@ -901,7 +907,7 @@ class TextualRobotnik(App):
         self.send_command(cmd)
         return self.command_future
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="mount")
     async def mount_slot_sequence(self, slot=0):
         global MOUNTED
 
@@ -909,7 +915,11 @@ class TextualRobotnik(App):
         if MOUNTED != 0 and MOUNTED != slot:
             # this will also try and locate a free slot if a card is suddenly in reader
             dismo_instance = self.dismount_slot_sequence()
-            await dismo_instance.wait()
+            try:
+                await dismo_instance.wait()
+            except WorkerCancelled:
+                self.log_general.write(f"mount_slot_sequence: dismount_slot_sequence cancelled", LOG_ERROR)
+                pass
 
         if MOUNTED == slot:
             self.log_general.write("Card already mounted.", LOG_MEDIA)
@@ -949,7 +959,7 @@ class TextualRobotnik(App):
             self.update_status("READY")
             self.disable_all_buttons(disable=False)
 
-    @work(exclusive=True)
+    @work(exclusive=True, group="dismount")
     async def dismount_slot_sequence(self):
         global MOUNTED, PSTATE
 
@@ -1019,7 +1029,6 @@ class TextualRobotnik(App):
             btn.add_class("blunk")
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
-        #self.log_general.write(f"on_button_pressed id={event.button.id}")
         if event.button.id.startswith("check"):
             await self.check_homed()
             slot = event.button.id[len("check"):]
@@ -1032,7 +1041,7 @@ class TextualRobotnik(App):
             await self.check_homed()
             self.dismount_slot_sequence()
         if event.button.id == "btn-rescan":
-            self.read_media_dir()
+            await self.read_media_dir()
         if event.button.id == "svc-abort":
             self.update_status("ABORTING")
             self.ABORTED = True
@@ -1045,10 +1054,13 @@ class TextualRobotnik(App):
 
     async def read_media_dir(self) -> None:
         try:
-            files = await asyncio.to_thread(os.listdir, robot_get_mount_point())
-            self.query_one(DirectoryTree).reload()
-            self.log_general.write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}", LOG_MEDIA)
+            olde_tree = self.query_one(DirectoryTree)
+            olde_tree.reload()
+
+            #files = await asyncio.to_thread(os.listdir, robot_get_mount_point())
+            #self.log_general.write(f"[bold cyan]Files:[/bold cyan] {' '.join(files)}", LOG_MEDIA)
         except OSError:
+            self.log_general.write(f"[bold cyan]Drive was not ready[/bold cyan]", LOG_MEDIA)
             self.notify("Drive was not ready", severity="error")
 
 def ansi_to_truecolor(ansi_str: str, bg = (0,0,0), sd = (40,40,40), contacts=(170,85,0)) -> str:

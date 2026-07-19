@@ -1,0 +1,9 @@
+[Unit]
+Description=Check robot SD card
+
+[Timer]
+OnBootSec=2
+OnUnitActiveSec=2
+
+[Install]
+WantedBy=timers.target

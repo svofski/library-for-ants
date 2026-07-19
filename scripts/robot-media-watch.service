@@ -1,0 +1,6 @@
+[Unit]
+Description=Watch robot SD card media
+
+[Service]
+Type=oneshot
+ExecStart=/home/svo/library_for_ants/scripts/robot-media-check.sh
