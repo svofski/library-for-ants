@@ -138,29 +138,30 @@ class TextualRobotnik(App):
     SUB_TITLE = "Robotnik v0.1"
     CSS = """
     Vertical {
-        margin: 1 2;
+        margin: 0 1;
+    }
+    Vertical#main {
     }
     #with-canvas-container {
-        height: 30;
+        height: 21;
         align-vertical: middle;
+        margin-top: 1;
     }
     #with-canvas-container > Vertical {
-    }
-    #layout-row-1 {
-        height: 14;
+        margin: 0;
     }
     #main-buttons-row {
-        height: 14;
+        height: 13;
     }
     #second-buttons-row {
         height: 5;
     }
     #logo {
-        width: 14;
-        height: 14;
+        width: 13;
+        height: 13;
     }
     #dir-header {
-        height: 2;
+        height: 1;
         align: left top;
     }
     #mount_label {
@@ -168,39 +169,40 @@ class TextualRobotnik(App):
         max-width: 40;
     }
     #btn-rescan {
-        background: $boost;
+        background: darkcyan;
+        margin-left: 2;
     }
     .sdcard-graphics {
         margin-top: 1;
+        width: 6;
     }
     .sdcard-graphics.present {
     }
     #gripor {
         overflow: hidden hidden;
-        height: 4;
+        height: 3;
         width: 4;
     }
+    #layout-row-logs {
+    }
     RichLog {
-        background: #000;
+        background: #112;
         color: #888;
-        border: solid ;
-        height: 1fr;
-        margin-bottom: 1;
+        border: darkgray;
     }
     Input {
         dock: bottom;
-        border: tall ;
     }
     Static {
         text-align: center;
     }
     Button.slot {
         background: #222;
-        min-width: 8;
+        min-width: 5;
         width: 100%;
     }
     Button.mount-button {
-        min-width: 8;
+        min-width: 5;
         width: 100%;
     }
     Button.slot.present {
@@ -259,13 +261,16 @@ class TextualRobotnik(App):
     #card-number {
         color: $accent;
         text-style: bold;
-        offset: 5 3;
+        offset: 2 3;
         position: absolute;
         width: 0;
         background: rgb(40,40,40); /* same as sdcard body */
     }
     #card-number.present {
         width: 2;
+    }
+    #tree-container {
+        min-height: 8;
     }
     """
 
@@ -306,7 +311,7 @@ class TextualRobotnik(App):
     def compose(self) -> ComposeResult:
         self.sdcard_ansi = Text.from_ansi(ansi_to_truecolor(SDCARD_ANS, (0,0,0)))
         yield Header(show_clock=True)
-        with Vertical():
+        with Vertical(id="vertical-main"):
             with Horizontal(id="with-canvas-container"):
                 with Middle(id="canvas-wrapper"):
                     yield Canvas(LOGO_W, LOGO_H + (LOGO_H % 2), Color(0,0,0), id="logo")
@@ -314,14 +319,14 @@ class TextualRobotnik(App):
                     with Horizontal(id="main-buttons-row"):
                         for n in range(12,0,-1):
                             with Vertical():
-                                yield Static(f"Slot {n}", shrink=True)
-                                yield Button("Check", id=f"check{n}", classes="slot")
-                                yield Button("Mount", id=f"mount{n}", classes="mount-button")
+                                yield Static(f"{n}", shrink=True)
+                                yield Button("CHK", id=f"check{n}", classes="slot")
+                                yield Button("MNT", id=f"mount{n}", classes="mount-button")
                                 yield Static(self.sdcard_ansi, id=f"sdcard{n}", classes="sdcard-graphics")
                         with Vertical():
-                            yield Static("Reader", shrink=True)
-                            yield Button("CHECK ALL", id="svc-check-all", classes="slot online")
-                            yield Button("Dismount", id="dismount", classes="mount-button", disabled=True)
+                            yield Static("RDR", shrink=True)
+                            yield Button("ALL", id="svc-check-all", classes="slot online")
+                            yield Button("DIS", id="dismount", classes="mount-button", disabled=True)
                             with Static(id="fart-container"):
                                 yield Static(self.sdcard_ansi, id=f"sdcard0", classes="sdcard-graphics")
                                 yield Static("", id="card-number")
@@ -336,7 +341,7 @@ class TextualRobotnik(App):
                 yield Button("Rescan", id="btn-rescan", compact=True)
             with Vertical(id="tree-container"):
                 yield DirectoryTree(robot_get_mount_point())
-            with Horizontal(id="layout-row-1"):
+            with Horizontal(id="layout-row-logs"):
                 yield RichLog(id="general_log", highlight=True, markup=True, max_lines=200)
                 yield RichLog(id="klipper_log", highlight=True, markup=True, max_lines=200)
             yield Input(id="input", placeholder="Type G-code or macro and press Enter...")
@@ -947,7 +952,7 @@ class TextualRobotnik(App):
                 await self.send_command_future(cmd_put(['put', 0]), 'put')
                 self.animate_gripor(slot=0, state=GRIPOR_STATE_OPEN)
                 dismo_btn.disabled = False
-                dismo_btn.label = f"Dismount"
+                dismo_btn.label = f"DIS"
                 MOUNTED = n
 
                 self.set_card_present(0, present=True)
@@ -983,7 +988,7 @@ class TextualRobotnik(App):
                 self.log_general.write(f"No room for card in reader")
 
         dismo_btn = self.query_one(f"#dismount")
-        dismo_btn.text = "Dismount"
+        dismo_btn.text = "DIS"
 
         self.disable_all_buttons(disable=True)
         self.update_status(f"DISMOUNTING CARD {MOUNTED}")
@@ -1082,7 +1087,6 @@ def ansi_to_truecolor(ansi_str: str, bg = (0,0,0), sd = (40,40,40), contacts=(17
         new_codes = [ansi_map.get(c, c) for c in codes]
         return f"\x1b[{';'.join(new_codes)}m"
 
-    # Regex captures sequence formatting values inside \x1b[...m
     return re.sub(r'\x1b\[([\d;]+)m', replace_code, ansi_str)
 
 
