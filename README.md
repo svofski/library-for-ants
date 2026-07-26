@@ -33,8 +33,8 @@ The scripts are in the [scripts](scripts) directory.
 
 From experience, every distro needs a bit of persuasion them to work so they're only provided as hints.
 
-References
-----------
+Acknowledgements
+----------------
 
 **Library for ants** would not be possible without previous work of other people to whom I owe my deepest respect.
 
