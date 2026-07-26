@@ -29,5 +29,4 @@ There are two Gripors: the pliers version (used in Library for ants) and the par
 
 Mechanics
 ---------
-The printables for the main assembly are all in one 3mf project [here](cad/printables/middleT-project.3mf)
-FreeCAD and STEP files will be made available as well.
+The mechanical parts are designed in FreeCAD. All CAD files are in the [cad](cad) folder.
