@@ -1,6 +1,12 @@
 T-bot design files
 ==================
 
+Printables
+----------
+All parts ready to print: [middleT-project.3mf](/cad/printables/middleT-project.3mf)
+
+Design files
+------------
 FreeCAD doesn't make it easy to keep track of changes and interdependencies. I apologise if something is missing. 
 
 Everything is built around linear rails with MGN12H blocks.
@@ -35,5 +41,11 @@ Middle T is a complex part that comprises two dovetailed pieces that ahold MGN12
 ![middlet](/cad/pics/middlet-2.jpg)
 (pictured upside down)
 
+### Storage
 
+This file has the magazine, magazine legs, usb reader leg and the bottom rail.
+
+[usb-reader-adapter1.FCStd](usb-reader-adapter1.FCStd)
+
+![storage](/cad/pics/storage.jpg)
 
