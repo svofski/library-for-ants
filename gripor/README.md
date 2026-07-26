@@ -31,5 +31,6 @@ Gears
 -----
 This is a parallel gripper. It requires no extra hardware except for the screws. 
 It's a good gripper that's easy to build, but it may be a bit less rigid than the pliers version.
+
 ![gears-model](/gripor/photo/gears1.gif)
 
